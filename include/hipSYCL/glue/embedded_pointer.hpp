@@ -43,7 +43,18 @@
 
 namespace hipsycl {
 namespace glue {
+namespace detail {
 
+template<class T>
+inline T random_number() {
+  thread_local std::random_device rd;
+  thread_local std::mt19937 gen{rd()};
+  thread_local std::uniform_int_distribution<T> distribution{0};
+
+  return distribution(gen);
+}
+
+}
 
 struct unique_id {
   static constexpr std::size_t num_components = 2;
@@ -57,27 +68,23 @@ struct unique_id {
 
   HIPSYCL_UNIVERSAL_TARGET
   unique_id() {
-#ifndef SYCL_DEVICE_ONLY
-    uint64_t ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::high_resolution_clock::now().time_since_epoch())
-            .count();
+    __hipsycl_if_target_host(
+      uint64_t ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::high_resolution_clock::now().time_since_epoch())
+              .count();
 
-    static std::random_device rd;
-    static std::mt19937 gen{rd()};
-    static std::uniform_int_distribution<uint64_t> distribution{0};
+      uint64_t random_number = detail::random_number<uint64_t>();
 
-    uint64_t random_number = distribution(gen);
+      char* ns_bytes = reinterpret_cast<char*>(&ns);
+      char* rnd_bytes = reinterpret_cast<char*>(&random_number);
 
-    char* ns_bytes = reinterpret_cast<char*>(&ns);
-    char* rnd_bytes = reinterpret_cast<char*>(&random_number);
-
-    for(int i = 0; i < sizeof(uint64_t); ++i) {
-      char *id_bytes = reinterpret_cast<char*>(&id[0]);
-      id_bytes[2 * i    ] = ns_bytes[i];
-      id_bytes[2 * i + 1] = rnd_bytes[i];
-    }
-#endif
+      for(int i = 0; i < sizeof(uint64_t); ++i) {
+        char *id_bytes = reinterpret_cast<char*>(&id[0]);
+        id_bytes[2 * i    ] = ns_bytes[i];
+        id_bytes[2 * i + 1] = rnd_bytes[i];
+      }
+    );
   }
 
   HIPSYCL_UNIVERSAL_TARGET
@@ -94,6 +101,10 @@ struct unique_id {
     return !(a == b);
   }
 
+  std::size_t hipSYCL_hash_code() const {
+    return id[0] ^ id[1];
+  }
+
   unique_id(const unique_id&) = default;
   unique_id& operator=(const unique_id&) = default;
 
@@ -108,29 +119,41 @@ inline std::ostream &operator<<(std::ostream &ostr, const unique_id &id) {
 template<class T>
 class embedded_pointer {
 public:
+  static_assert(sizeof(unique_id) == 2 * sizeof(void*));
+
+  embedded_pointer() {
+    __hipsycl_if_target_host(
+      unique_id uid;
+      std::memcpy(&_ptrs[0], &uid, sizeof(unique_id));
+    );
+  }
+
+  embedded_pointer(const embedded_pointer&) = default;
+
   HIPSYCL_UNIVERSAL_TARGET
   T* get() const {
-    static_assert(sizeof(T*) == sizeof(uint64_t));
-    static_assert(sizeof(T*) == sizeof(unique_id) / 2);
 
-    return reinterpret_cast<T*>(_uid.id[0]);
+    return reinterpret_cast<T*>(_ptrs[0]);
   }
 
   HIPSYCL_UNIVERSAL_TARGET
-  const unique_id& get_uid() const {
-    return _uid;
+  unique_id get_uid() const {
+    // Initialize to 0 to avoid generating new id
+    unique_id id{0};
+    std::memcpy(&id, &_ptrs[0], sizeof(unique_id));
+    return id;
   }
 
   // this is only necessary when no initialization
   // from within a kernel blob happens
   void explicit_init(void* ptr) {
-    _uid.id[0] = reinterpret_cast<uint64_t>(ptr);
-    _uid.id[1] = 0;
+    _ptrs[0] = ptr;
+    _ptrs[1] = 0;
   }
   
   HIPSYCL_UNIVERSAL_TARGET
   friend bool operator==(const embedded_pointer &a, const embedded_pointer &b) {
-    return a._uid == b._uid;
+    return a._ptrs[0] == b._ptrs[0] && a._ptrs[1] == b._ptrs[1];
   }
 
   HIPSYCL_UNIVERSAL_TARGET
@@ -139,7 +162,7 @@ public:
   }
 
 private:
-  unique_id _uid;
+  void* _ptrs [2];
 };
 
 struct kernel_blob {

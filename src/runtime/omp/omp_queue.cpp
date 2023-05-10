@@ -26,15 +26,19 @@
  */
 
 #include "hipSYCL/runtime/omp/omp_queue.hpp"
+#include "hipSYCL/glue/kernel_configuration.hpp"
 #include "hipSYCL/runtime/event.hpp"
 #include "hipSYCL/runtime/generic/async_worker.hpp"
 #include "hipSYCL/runtime/hints.hpp"
+#include "hipSYCL/runtime/inorder_queue.hpp"
 #include "hipSYCL/runtime/instrumentation.hpp"
 #include "hipSYCL/runtime/omp/omp_event.hpp"
 #include "hipSYCL/runtime/application.hpp"
 #include "hipSYCL/runtime/error.hpp"
 #include "hipSYCL/runtime/kernel_launcher.hpp"
 #include "hipSYCL/runtime/operations.hpp"
+#include "hipSYCL/runtime/queue_completion_event.hpp"
+#include "hipSYCL/runtime/signal_channel.hpp"
 
 #include <memory>
 
@@ -185,6 +189,13 @@ std::shared_ptr<dag_node_event> omp_queue::insert_event() {
   return evt;
 }
 
+std::shared_ptr<dag_node_event> omp_queue::create_queue_completion_event() {
+  return std::make_shared<
+      queue_completion_event<std::shared_ptr<signal_channel>, omp_node_event>>(
+      this);
+}
+
+
 result omp_queue::submit_memcpy(memcpy_operation &op, dag_node_ptr node) {
   HIPSYCL_DEBUG_INFO << "omp_queue: Submitting memcpy operation..." << std::endl;
 
@@ -297,14 +308,15 @@ result omp_queue::submit_kernel(kernel_operation &op, dag_node_ptr node) {
 
   
   rt::dag_node* node_ptr = node.get();
-  
+  const glue::kernel_configuration *config =
+      &(op.get_launcher().get_kernel_configuration());
 
   omp_instrumentation_setup instrumentation_setup{op, node};
   _worker([=]() {
     auto instrumentation_guard = instrumentation_setup.instrument_task();
 
     HIPSYCL_DEBUG_INFO << "omp_queue [async]: Invoking kernel!" << std::endl;
-    launcher->invoke(node_ptr);
+    launcher->invoke(node_ptr, *config);
   });
 
   return make_success();
@@ -368,6 +380,17 @@ result omp_queue::submit_queue_wait_for(std::shared_ptr<dag_node_event> evt) {
   return make_success();
 }
 
+result omp_queue::wait() {
+  _worker.wait();
+  return make_success();
+}
+
+result omp_queue::query_status(inorder_queue_status &status) {
+  status = inorder_queue_status{_worker.queue_size() == 0};
+  return make_success();
+}
+
+
 result omp_queue::submit_external_wait_for(dag_node_ptr node) {
   HIPSYCL_DEBUG_INFO << "omp_queue: Submitting wait for external node..."
                      << std::endl;
@@ -394,10 +417,6 @@ device_id omp_queue::get_device() const {
 }
 
 void *omp_queue::get_native_type() const {
-  return nullptr;
-}
-
-module_invoker *omp_queue::get_module_invoker() {
   return nullptr;
 }
 

@@ -7,22 +7,23 @@
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ * this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright notice,
  *    this list of conditions and the following disclaimer in the documentation
  *    and/or other materials provided with the distribution.
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef HIPSYCL_THREAD_HIERARCHY_HPP
@@ -34,94 +35,134 @@
 #include "../range.hpp"
 #include "data_layout.hpp"
 
-#if !HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_HIP &&                                \
-    !HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_CUDA &&                               \
-    !HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_SPIRV
-#error "This file requires a device compiler"
-#endif
 
 namespace hipsycl {
 namespace sycl {
 namespace detail {
 
-#ifndef SYCL_DEVICE_ONLY
-// Define dummy values in case we are not in a device
-// compilation pass. This makes it easier to use the
-// functions from this file as we can call them
-// without having to ifdef their usage.
-#define __hipsycl_lid_x 0
-#define __hipsycl_lid_y 0
-#define __hipsycl_lid_z 0
+#define HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(name, cuda_variable,             \
+                                              hip_variable, spirv_variable,    \
+                                              sscp_variable, host_variable)    \
+  HIPSYCL_KERNEL_TARGET                                                        \
+  inline int name() {                                                          \
+    __hipsycl_backend_switch(return 0, return sscp_variable(),                 \
+                                    return cuda_variable, return hip_variable, \
+                                    return spirv_variable)                     \
+  }
 
-#define __hipsycl_gid_x 0
-#define __hipsycl_gid_y 0
-#define __hipsycl_gid_z 0
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_lid_x, 
+  threadIdx.x,
+  hipThreadIdx_x,
+  __spirv_BuiltInLocalInvocationId.x,
+  __hipsycl_sscp_get_local_id_x,
+  0)
 
-#define __hipsycl_lsize_x 0
-#define __hipsycl_lsize_y 0
-#define __hipsycl_lsize_z 0
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_lid_y, 
+  threadIdx.y,
+  hipThreadIdx_y,
+  __spirv_BuiltInLocalInvocationId.y,
+  __hipsycl_sscp_get_local_id_y,
+  0)
 
-#define __hipsycl_ngroups_x 0
-#define __hipsycl_ngroups_y 0
-#define __hipsycl_ngroups_z 0
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_lid_z, 
+  threadIdx.z,
+  hipThreadIdx_z,
+  __spirv_BuiltInLocalInvocationId.z,
+  __hipsycl_sscp_get_local_id_z,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_gid_x,
+  blockIdx.x,
+  hipBlockIdx_x,
+  __spirv_BuiltInWorkgroupId.x,
+  __hipsycl_sscp_get_group_id_x,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_gid_y,
+  blockIdx.y,
+  hipBlockIdx_y,
+  __spirv_BuiltInWorkgroupId.y,
+  __hipsycl_sscp_get_group_id_y,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_gid_z,
+  blockIdx.z,
+  hipBlockIdx_z,
+  __spirv_BuiltInWorkgroupId.z,
+  __hipsycl_sscp_get_group_id_z,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_lsize_x,
+  blockDim.x,
+  hipBlockDim_x,
+  __spirv_BuiltInWorkgroupSize.x, 
+  __hipsycl_sscp_get_local_size_x,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_lsize_y,
+  blockDim.y,
+  hipBlockDim_y,
+  __spirv_BuiltInWorkgroupSize.y,
+  __hipsycl_sscp_get_local_size_y,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_lsize_z,
+  blockDim.z,
+  hipBlockDim_z,
+  __spirv_BuiltInWorkgroupSize.z,
+  __hipsycl_sscp_get_local_size_z,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_ngroups_x,
+  gridDim.x,
+  hipGridDim_x,
+  __spirv_BuiltInNumWorkgroups.x,
+  __hipsycl_sscp_get_num_groups_x,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_ngroups_y,
+  gridDim.y,
+  hipGridDim_y,
+  __spirv_BuiltInNumWorkgroups.y,
+  __hipsycl_sscp_get_num_groups_y,
+  0)
+
+HIPSYCL_DEFINE_BUILTIN_VARIABLE_QUERY(__hipsycl_get_ngroups_z,
+  gridDim.z,
+  hipGridDim_z,
+  __spirv_BuiltInNumWorkgroups.z,
+  __hipsycl_sscp_get_num_groups_z,
+  0)
+
+#define __hipsycl_lid_x ::hipsycl::sycl::detail::__hipsycl_get_lid_x()
+#define __hipsycl_lid_y ::hipsycl::sycl::detail::__hipsycl_get_lid_y()
+#define __hipsycl_lid_z ::hipsycl::sycl::detail::__hipsycl_get_lid_z()
+
+#define __hipsycl_gid_x ::hipsycl::sycl::detail::__hipsycl_get_gid_x()
+#define __hipsycl_gid_y ::hipsycl::sycl::detail::__hipsycl_get_gid_y()
+#define __hipsycl_gid_z ::hipsycl::sycl::detail::__hipsycl_get_gid_z()
+
+#define __hipsycl_lsize_x ::hipsycl::sycl::detail::__hipsycl_get_lsize_x()
+#define __hipsycl_lsize_y ::hipsycl::sycl::detail::__hipsycl_get_lsize_y()
+#define __hipsycl_lsize_z ::hipsycl::sycl::detail::__hipsycl_get_lsize_z()
+
+#define __hipsycl_ngroups_x ::hipsycl::sycl::detail::__hipsycl_get_ngroups_x()
+#define __hipsycl_ngroups_y ::hipsycl::sycl::detail::__hipsycl_get_ngroups_y()
+#define __hipsycl_ngroups_z ::hipsycl::sycl::detail::__hipsycl_get_ngroups_z()
+
+#if HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_HIP ||                                 \
+    HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_CUDA
+
+#ifdef HIPSYCL_LIBKERNEL_CUDA_NVCXX
+  // warpSize is not constexpr with nvc++. Hardcode to 32
+  // for now
+  #define __hipsycl_warp_size 32
 #else
-
-#if HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_HIP
-
-#define __hipsycl_lid_x hipThreadIdx_x
-#define __hipsycl_lid_y hipThreadIdx_y
-#define __hipsycl_lid_z hipThreadIdx_z
-
-#define __hipsycl_gid_x hipBlockIdx_x
-#define __hipsycl_gid_y hipBlockIdx_y
-#define __hipsycl_gid_z hipBlockIdx_z
-
-#define __hipsycl_lsize_x hipBlockDim_x
-#define __hipsycl_lsize_y hipBlockDim_y
-#define __hipsycl_lsize_z hipBlockDim_z
-
-#define __hipsycl_ngroups_x hipGridDim_x
-#define __hipsycl_ngroups_y hipGridDim_y
-#define __hipsycl_ngroups_z hipGridDim_z
-
-#elif HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_CUDA
-
-#define __hipsycl_lid_x threadIdx.x
-#define __hipsycl_lid_y threadIdx.y
-#define __hipsycl_lid_z threadIdx.z
-
-#define __hipsycl_gid_x blockIdx.x
-#define __hipsycl_gid_y blockIdx.y
-#define __hipsycl_gid_z blockIdx.z
-
-#define __hipsycl_lsize_x blockDim.x
-#define __hipsycl_lsize_y blockDim.y
-#define __hipsycl_lsize_z blockDim.z
-
-#define __hipsycl_ngroups_x gridDim.x
-#define __hipsycl_ngroups_y gridDim.y
-#define __hipsycl_ngroups_z gridDim.z
-
-#elif HIPSYCL_LIBKERNEL_COMPILER_SUPPORTS_SPIRV
-
-#define __hipsycl_lid_x __spirv_BuiltInLocalInvocationId.x
-#define __hipsycl_lid_y __spirv_BuiltInLocalInvocationId.y
-#define __hipsycl_lid_z __spirv_BuiltInLocalInvocationId.z
-
-#define __hipsycl_gid_x __spirv_BuiltInWorkgroupId.x
-#define __hipsycl_gid_y __spirv_BuiltInWorkgroupId.y
-#define __hipsycl_gid_z __spirv_BuiltInWorkgroupId.z
-
-#define __hipsycl_lsize_x __spirv_BuiltInWorkgroupSize.x
-#define __hipsycl_lsize_y __spirv_BuiltInWorkgroupSize.y
-#define __hipsycl_lsize_z __spirv_BuiltInWorkgroupSize.z
-
-#define __hipsycl_ngroups_x __spirv_BuiltInNumWorkgroups.x
-#define __hipsycl_ngroups_y __spirv_BuiltInNumWorkgroups.y
-#define __hipsycl_ngroups_z __spirv_BuiltInNumWorkgroups.z
+  #define __hipsycl_warp_size warpSize
+#endif
 
 #endif
-#endif // SYCL_DEVICE_ONLY
+
 
 
 // The get_global_id_* and get_global_size_* functions 
@@ -172,17 +213,17 @@ sycl::id<dimensions> get_local_id();
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::id<1> get_local_id<1>()
-{ return sycl::id<1>{__hipsycl_lid_x}; }
+{ return sycl::id<1>(__hipsycl_lid_x); }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::id<2> get_local_id<2>()
-{ return sycl::id<2>{__hipsycl_lid_y, __hipsycl_lid_x}; }
+{ return sycl::id<2>(__hipsycl_lid_y, __hipsycl_lid_x); }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::id<3> get_local_id<3>()
-{ return sycl::id<3>{__hipsycl_lid_z, __hipsycl_lid_y, __hipsycl_lid_x}; }
+{ return sycl::id<3>(__hipsycl_lid_z, __hipsycl_lid_y, __hipsycl_lid_x); }
 
 template<int dimensions>
 HIPSYCL_KERNEL_TARGET
@@ -217,23 +258,23 @@ sycl::id<dimensions> get_group_id();
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::id<1> get_group_id<1>()
-{ return sycl::id<1>{__hipsycl_gid_x}; }
+{ return sycl::id<1>(__hipsycl_gid_x); }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::id<2> get_group_id<2>()
 {
-  return sycl::id<2>{__hipsycl_gid_y,
-                     __hipsycl_gid_x};
+  return sycl::id<2>(__hipsycl_gid_y,
+                     __hipsycl_gid_x);
 }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::id<3> get_group_id<3>()
 {
-  return sycl::id<3>{__hipsycl_gid_z,
+  return sycl::id<3>(__hipsycl_gid_z,
                      __hipsycl_gid_y,
-                     __hipsycl_gid_x};
+                     __hipsycl_gid_x);
 }
 
 template<int dimensions>
@@ -244,21 +285,21 @@ template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::range<1> get_grid_size<1>()
 {
-  return sycl::range<1>{__hipsycl_ngroups_x};
+  return sycl::range<1>(__hipsycl_ngroups_x);
 }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::range<2> get_grid_size<2>()
 {
-  return sycl::range<2>{__hipsycl_ngroups_y, __hipsycl_ngroups_x};
+  return sycl::range<2>(__hipsycl_ngroups_y, __hipsycl_ngroups_x);
 }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::range<3> get_grid_size<3>()
 {
-  return sycl::range<3>{__hipsycl_ngroups_z, __hipsycl_ngroups_y, __hipsycl_ngroups_x};
+  return sycl::range<3>(__hipsycl_ngroups_z, __hipsycl_ngroups_y, __hipsycl_ngroups_x);
 }
 
 
@@ -270,21 +311,21 @@ template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::range<1> get_local_size<1>()
 {
-  return sycl::range<1>{__hipsycl_lsize_x};
+  return sycl::range<1>(__hipsycl_lsize_x);
 }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::range<2> get_local_size<2>()
 {
-  return sycl::range<2>{__hipsycl_lsize_y, __hipsycl_lsize_x};
+  return sycl::range<2>(__hipsycl_lsize_y, __hipsycl_lsize_x);
 }
 
 template<>
 HIPSYCL_KERNEL_TARGET
 inline sycl::range<3> get_local_size<3>()
 {
-  return sycl::range<3>{__hipsycl_lsize_z, __hipsycl_lsize_y, __hipsycl_lsize_x};
+  return sycl::range<3>(__hipsycl_lsize_z, __hipsycl_lsize_y, __hipsycl_lsize_x);
 }
 
 template<int dimensions>

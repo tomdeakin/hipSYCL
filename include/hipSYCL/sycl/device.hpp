@@ -36,13 +36,14 @@
 #include "types.hpp"
 #include "aspect.hpp"
 #include "info/info.hpp"
-#include "libkernel/backend.hpp"
+#include "backend.hpp"
 #include "exception.hpp"
 #include "version.hpp"
-#include "hipSYCL/sycl/libkernel/id.hpp"
+#include "hipSYCL/sycl/libkernel/range.hpp"
 
 #include "hipSYCL/runtime/device_id.hpp"
 #include "hipSYCL/runtime/application.hpp"
+#include "hipSYCL/runtime/runtime.hpp"
 #include "hipSYCL/runtime/backend.hpp"
 #include "hipSYCL/runtime/hardware.hpp"
 
@@ -63,7 +64,6 @@ rt::device_id extract_rt_device(const device&);
 
 }
 
-class device_selector;
 class platform;
 
 class device {
@@ -74,11 +74,10 @@ class device {
 public:
   device(rt::device_id id)
       : _device_id{id} {}
- 
-  device()
-      : _device_id(detail::get_host_device()) {}
 
   // Implemented in device_selector.hpp
+  device();
+  
   template <class DeviceSelector>
   explicit device(const DeviceSelector &deviceSelector);
 
@@ -169,16 +168,20 @@ public:
     if(_device_id.get_backend() == rt::backend_id::level_zero)
       return true;
 #endif
-    
+
+#if defined(__HIPSYCL_ENABLE_LLVM_SSCP_TARGET__)
+    if (get_rt_device()->has(rt::device_support_aspect::sscp_kernels))
+      return true;
+#endif
+
     return false;
   }
 
   // Implemented in platform.hpp
   platform get_platform() const;
 
-  template <info::device param>
-  typename info::param_traits<info::device, param>::return_type
-  get_info() const;
+  template <typename Param>
+  typename Param::return_type get_info() const;
 
   bool has_extension(const string_class &extension) const
   {
@@ -219,8 +222,9 @@ public:
   get_devices(info::device_type deviceType = info::device_type::all) {
 
     std::vector<device> result;
+    rt::runtime_keep_alive_token requires_runtime;
 
-    rt::application::backends().for_each_backend(
+    requires_runtime.get()->backends().for_each_backend(
         [&](rt::backend *b) {
           rt::backend_descriptor bd = b->get_backend_descriptor();
           std::size_t num_devices =
@@ -229,8 +233,7 @@ public:
           for (std::size_t dev = 0; dev < num_devices; ++dev) {
             rt::device_id d_id{bd, static_cast<int>(dev)};
 
-            device d;
-            d._device_id = d_id;
+            device d{d_id};
 
             if (deviceType == info::device_type::all ||
                 (deviceType == info::device_type::accelerator &&
@@ -257,12 +260,24 @@ public:
   friend bool operator!=(const device& lhs, const device &rhs)
   { return !(lhs == rhs); }
   
+  backend get_backend() const noexcept {
+    return _device_id.get_backend();
+  }
+
+  std::size_t hipSYCL_hash_code() const {
+    return std::hash<hipsycl::rt::device_id>{}(_device_id);
+  }
+
+  rt::runtime* hipSYCL_runtime() const {
+    return _requires_runtime.get();
+  }
 private:
   rt::device_id _device_id;
+  rt::runtime_keep_alive_token _requires_runtime;
 
   rt::hardware_context *get_rt_device() const {
-    auto ptr = rt::application::get_backend(_device_id.get_backend())
-                   .get_hardware_manager()
+    auto ptr = _requires_runtime.get()->backends().get(_device_id.get_backend())
+                   ->get_hardware_manager()
                    ->get_device(_device_id.get_id());
     if (!ptr) {
       throw runtime_error{"Could not access device"};
@@ -296,15 +311,39 @@ HIPSYCL_SPECIALIZE_GET_INFO(device, max_compute_units)
 HIPSYCL_SPECIALIZE_GET_INFO(device, max_work_item_dimensions)
 { return 3; }
 
-HIPSYCL_SPECIALIZE_GET_INFO(device, max_work_item_sizes)
+HIPSYCL_SPECIALIZE_GET_INFO(device, max_work_item_sizes<1>)
 {
   std::size_t size0 = static_cast<std::size_t>(get_rt_device()->get_property(
-      rt::device_uint_property::max_global_size0));
+      rt::device_uint_property::max_group_size0));
+  return range<1>{size0};
+}
+
+HIPSYCL_SPECIALIZE_GET_INFO(device, max_work_item_sizes<2>)
+{
+  std::size_t size0 = static_cast<std::size_t>(get_rt_device()->get_property(
+      rt::device_uint_property::max_group_size0));
   std::size_t size1 = static_cast<std::size_t>(get_rt_device()->get_property(
-      rt::device_uint_property::max_global_size1));
+      rt::device_uint_property::max_group_size1));
+  if (get_rt_device()->get_property(
+      rt::device_uint_property::needs_dimension_flip))
+    return range<2>{size1, size0};
+  else
+    return range<2>{size0, size1};
+}
+
+HIPSYCL_SPECIALIZE_GET_INFO(device, max_work_item_sizes<3>)
+{
+  std::size_t size0 = static_cast<std::size_t>(get_rt_device()->get_property(
+      rt::device_uint_property::max_group_size0));
+  std::size_t size1 = static_cast<std::size_t>(get_rt_device()->get_property(
+      rt::device_uint_property::max_group_size1));
   std::size_t size2 = static_cast<std::size_t>(get_rt_device()->get_property(
-      rt::device_uint_property::max_global_size2));
-  return id<3>{size0, size1, size2};
+      rt::device_uint_property::max_group_size2));
+  if (get_rt_device()->get_property(
+      rt::device_uint_property::needs_dimension_flip))
+    return range<3>{size2, size1, size0};
+  else
+    return range<3>{size0, size1, size2};
 }
 
 HIPSYCL_SPECIALIZE_GET_INFO(device, max_work_group_size)
@@ -527,8 +566,8 @@ HIPSYCL_SPECIALIZE_GET_INFO(device, global_mem_cache_type)
           rt::device_support_aspect::global_mem_cache_read_only))
     return info::global_mem_cache_type::read_only;
   else if (get_rt_device()->has(
-          rt::device_support_aspect::global_mem_cache_write_only))
-    return info::global_mem_cache_type::write_only;
+          rt::device_support_aspect::global_mem_cache_read_write))
+    return info::global_mem_cache_type::read_write;
 
   return info::global_mem_cache_type::none;
 }
@@ -721,6 +760,17 @@ inline rt::device_id extract_rt_device(const device &d) {
 } // namespace sycl
 } // namespace hipsycl
 
+namespace std {
 
+template <>
+struct hash<hipsycl::sycl::device>
+{
+  std::size_t operator()(const hipsycl::sycl::device& d) const
+  {
+    return d.hipSYCL_hash_code();
+  }
+};
+
+}
 
 #endif

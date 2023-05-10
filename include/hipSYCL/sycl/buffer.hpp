@@ -177,6 +177,8 @@ extract_buffer_data_region(const BufferT &buff);
 
 struct buffer_impl
 {
+  rt::runtime_keep_alive_token requires_runtime;
+
   std::mutex lock;
   // Only used if a shared_ptr is passed to set_final_data()
   std::shared_ptr<void> writeback_buffer;
@@ -215,7 +217,7 @@ struct buffer_impl
           // there is a device that has up-to-date data.
           submit_copy(detail::get_host_device(), writeback_ptr);
         } else {
-          rt::dag_build_guard build{rt::application::dag()};
+          rt::dag_build_guard build{requires_runtime.get()->dag()};
 
           auto explicit_requirement =
               rt::make_operation<rt::buffer_memory_requirement>(
@@ -226,8 +228,8 @@ struct buffer_impl
           add_writeback_hints(detail::get_host_device(), hints);
 
           build.builder()->add_explicit_mem_requirement(
-              std::move(explicit_requirement), rt::requirements_list{},
-              hints);
+              std::move(explicit_requirement),
+              rt::requirements_list{requires_runtime.get()}, hints);
         }
       }
     }
@@ -246,7 +248,7 @@ struct buffer_impl
                   "but not marked as submitted, performing emergency DAG flush."
                 << std::endl;
 
-            rt::application::dag().flush_sync();
+            requires_runtime.get()->dag().flush_sync();
           }
           assert(user_ptr->is_submitted());
           user_ptr->wait();
@@ -273,11 +275,11 @@ private:
 
     std::shared_ptr<rt::buffer_data_region> data_src = this->data;
 
-    rt::dag_build_guard build{rt::application::dag()};
+    rt::dag_build_guard build{requires_runtime.get()->dag()};
     rt::execution_hints hints;
     add_writeback_hints(source_dev, hints);
 
-    rt::requirements_list reqs;
+    rt::requirements_list reqs{requires_runtime.get()};
 
     auto req = std::make_unique<rt::buffer_memory_requirement>(
         data_src, rt::id<3>{}, data_src->get_num_elements(), access_mode::read,
@@ -304,12 +306,35 @@ private:
 
 };
 
+template <typename, typename = void>
+struct has_data : std::false_type {};
+
+template <typename Container>
+struct has_data<Container, std::void_t<decltype(std::data(std::declval<Container>()))>>
+  : std::true_type {};
+
+template <typename, typename = void>
+struct has_size : std::false_type {};
+
+template <typename Container>
+struct has_size<Container, std::void_t<decltype(std::size(std::declval<Container>()))>>
+  : std::true_type {};
+
+template <typename Container, typename T>
+using enable_if_contiguous = std::void_t<std::enable_if_t<
+  has_data<Container>::value &&
+  has_size<Container>::value &&
+  std::is_convertible_v<decltype(std::data(std::declval<Container>())),
+                        const T*>>>;
 }
 
 
 namespace buffer_allocation {
 
 // This class is part of the USM-buffer interop API
+//
+// TODO Currently cannot represent allocations from
+// malloc_host()
 template <class T> struct descriptor {
   // the USM allocation used for this device
   T *ptr;
@@ -582,7 +607,8 @@ public:
       std::copy(first, last, reinterpret_cast<T*>(&(contiguous_buffer[0])));
       copy_host_content(reinterpret_cast<T*>(contiguous_buffer.data()));
     } else {
-      std::vector<T> contiguous_buffer(num_elements);
+      std::vector<T> contiguous_buffer;
+      contiguous_buffer.reserve(num_elements);
       std::copy(first, last, contiguous_buffer.begin());
       copy_host_content(contiguous_buffer.data());
     }
@@ -594,6 +620,59 @@ public:
          const property_list &propList = {})
   : buffer(first, last, AllocatorT(), propList) 
   {}
+
+  template <typename Container,
+            int D = dimensions,
+            typename = std::enable_if_t<D == 1>,
+            typename = detail::enable_if_contiguous<Container, T>>
+  buffer(Container& container, AllocatorT allocator,
+         const property_list& propList = {})
+    : detail::property_carrying_object{propList}
+  {
+    _impl = std::make_shared<detail::buffer_impl>();
+    _alloc = allocator;
+    
+    constexpr bool is_const_container = std::is_const_v<
+      std::remove_pointer_t<decltype(std::data(container))>>;
+
+    default_policies dpol;
+    dpol.destructor_waits = true;
+    // If std::data returns non-const pointer, enable write_back
+    if constexpr (is_const_container) {
+      dpol.writes_back = false;
+      dpol.use_external_storage = false;
+    } else {
+      dpol.writes_back = true;
+      dpol.use_external_storage = true;
+    }
+
+    init_policies_from_properties_or_default(dpol);
+
+    const range<1> bufferRange(std::size(container));
+
+    if constexpr (is_const_container) {
+      if (_impl->use_external_storage) {
+         HIPSYCL_DEBUG_WARNING
+          << "buffer: constructed with property use_external_storage, but user "
+             "passed a const container to buffer constructor. Removing const to enforce "
+             "requested view semantics."
+          << std::endl;
+         this->init(bufferRange, const_cast<T*>(std::data(container)));
+      } else {
+        this->init(bufferRange);
+        copy_host_content(std::data(container));
+      }
+    } else {
+      this->init(bufferRange, std::data(container));
+    }
+  }
+
+  template <typename Container,
+            int D = dimensions,
+            typename = std::enable_if_t<D == 1>,
+            typename = detail::enable_if_contiguous<Container, T>>
+  buffer(Container& container, const property_list& propList = {})
+    : buffer(container, AllocatorT(), propList) {}
 
   buffer(buffer<T, dimensions, AllocatorT> b,
          const id<dimensions> &baseIndex,
@@ -613,14 +692,24 @@ public:
     return _range;
   }
 
-  std::size_t get_count() const
+  std::size_t size() const noexcept
   {
     return _range.size();
   }
 
+  std::size_t byte_size() const noexcept
+  {
+    return size() * sizeof(T);
+  }
+
   std::size_t get_size() const
   {
-    return get_count() * sizeof(T);
+    return byte_size();
+  }
+
+  std::size_t get_count() const
+  {
+    return size();
   }
 
   AllocatorT get_allocator() const
@@ -711,14 +800,37 @@ public:
   { return false; }
 
   template <typename ReinterpretT, int ReinterpretDim>
-  buffer<ReinterpretT, ReinterpretDim, AllocatorT>
+  buffer<ReinterpretT, ReinterpretDim,
+        typename std::allocator_traits<AllocatorT>
+                 ::template rebind_alloc<ReinterpretT>>
   reinterpret(range<ReinterpretDim> reinterpretRange) const {
+    if(_range.size() * sizeof(T) != reinterpretRange.size() * sizeof(ReinterpretT))
+      throw invalid_parameter_error{"reinterpret must preserve the byte count of the buffer"};
 
-    buffer<ReinterpretT, ReinterpretDim, AllocatorT> new_buffer;
-    new_buffer.init_from(*this);
+    buffer<ReinterpretT, ReinterpretDim,
+            typename std::allocator_traits<AllocatorT>::template rebind_alloc<
+            ReinterpretT>> new_buffer;
+    static_cast<detail::property_carrying_object&>(new_buffer) = *this;
+    new_buffer._alloc = _alloc;
+    new_buffer._impl = _impl;
     new_buffer._range = reinterpretRange;
     
     return new_buffer;
+  }
+
+  template <typename ReinterpretT, int ReinterpretDim = dimensions,
+    std::enable_if_t<ReinterpretDim == 1 ||
+      (ReinterpretDim == dimensions && sizeof(ReinterpretT) == sizeof(T)), int> = 0>
+  buffer<ReinterpretT, ReinterpretDim,
+        typename std::allocator_traits<AllocatorT>
+                 ::template rebind_alloc<ReinterpretT>>
+  reinterpret() const {
+    if constexpr (ReinterpretDim == 1) {
+      return reinterpret<ReinterpretT, 1>(range<1>{
+        (_range.size() * sizeof(T)) / sizeof(ReinterpretT)});
+    } else {
+      return reinterpret<ReinterpretT, ReinterpretDim>(_range);
+    }
   }
 
   friend bool operator==(const buffer& lhs, const buffer& rhs)
@@ -729,6 +841,14 @@ public:
   friend bool operator!=(const buffer& lhs, const buffer& rhs)
   {
     return !(lhs == rhs);
+  }
+
+  std::size_t hipSYCL_hash_code() const {
+    return std::hash<void*>{}(_impl.get());
+  }
+
+  rt::runtime* hipSYCL_runtime() const {
+    return _impl->requires_runtime.get();
   }
 
   // --- The following methods are part the hipSYCL buffer introspection API
@@ -990,14 +1110,6 @@ private:
   buffer()
   : detail::property_carrying_object {property_list {}}
   {}
-
-  template <class OtherT, int OtherDim, class OtherAllocatorT>
-  void init_from(const buffer<OtherT, OtherDim, OtherAllocatorT> &other) {
-    detail::property_carrying_object::operator=(other);
-    this->_alloc = other._alloc;
-    this->_range = other._range;
-    this->_impl = other._impl;
-  }
   
   void init_data_backend(const range<dimensions>& range)
   {
@@ -1018,19 +1130,20 @@ private:
   {
     void* host_ptr = nullptr;
     rt::device_id host_device = detail::get_host_device();
+    rt::runtime* rt = _impl->requires_runtime.get();
 
     if(!_impl->data->has_allocation(host_device)){
       if(this->has_property<property::buffer::use_optimized_host_memory>()){
         // TODO: Actually may need to use non-host backend here...
         host_ptr =
-            rt::application::get_backend(host_device.get_backend())
-                .get_allocator(host_device)
+            rt->backends().get(host_device.get_backend())
+                ->get_allocator(host_device)
                 ->allocate_optimized_host(
                     alignof(T), _impl->data->get_num_elements().size() * sizeof(T));
       } else {
         host_ptr =
-            rt::application::get_backend(host_device.get_backend())
-                .get_allocator(host_device)
+            rt->backends().get(host_device.get_backend())
+                ->get_allocator(host_device)
                 ->allocate(
                     alignof(T), _impl->data->get_num_elements().size() * sizeof(T));
       }
@@ -1038,9 +1151,11 @@ private:
       if(!host_ptr)
         throw runtime_error{"buffer: host memory allocation failed"};
 
-      
-      _impl->data->add_empty_allocation(host_device, host_ptr,
-                                        true /*takes_ownership*/);
+      _impl->data->add_empty_allocation(
+          host_device, host_ptr,
+          rt->backends().get(host_device.get_backend())
+              ->get_allocator(host_device),
+          true /*takes_ownership*/);
     }
   }
 
@@ -1075,7 +1190,12 @@ private:
 
     this->init_data_backend(range);
 
+    rt::device_id host_device = detail::get_host_device();
     _impl->data->add_nonempty_allocation(detail::get_host_device(), host_memory,
+                                         _impl->requires_runtime.get()
+                                             ->backends()
+                                             .get(host_device.get_backend())
+                                             ->get_allocator(host_device),
                                          false /*takes_ownership*/);
     // Remember host_memory in case of potential write back
     _impl->writeback_ptr = host_memory;
@@ -1098,14 +1218,18 @@ private:
         throw invalid_parameter_error{"buffer: Invalid USM input pointer"};
       }
 
+      rt::device_id dev = detail::extract_rt_device(desc.desc.dev);
+      rt::backend_allocator *allocator = _impl->requires_runtime.get()
+                                             ->backends()
+                                             .get(dev.get_backend())
+                                             ->get_allocator(dev);
+
       if (desc.is_recent) {
         _impl->data->add_nonempty_allocation(
-            detail::extract_rt_device(desc.desc.dev), desc.desc.ptr,
-            desc.desc.is_owned);
+            dev, desc.desc.ptr, allocator, desc.desc.is_owned);
       } else {
         _impl->data->add_empty_allocation(
-            detail::extract_rt_device(desc.desc.dev), desc.desc.ptr,
-            desc.desc.is_owned);
+            dev, desc.desc.ptr, allocator, desc.desc.is_owned);
       }
     }
   }
@@ -1122,8 +1246,16 @@ buffer(InputIterator, InputIterator, AllocatorT, const property_list & = {})
 -> buffer<typename std::iterator_traits<InputIterator>::value_type, 1, AllocatorT>;
 
 template <class InputIterator>
-buffer(InputIterator, InputIterator, const property_list & = {}) 
--> buffer<typename std::iterator_traits<InputIterator>::value_type, 1>; 
+buffer(InputIterator, InputIterator, const property_list & = {})
+-> buffer<typename std::iterator_traits<InputIterator>::value_type, 1>;
+
+template <class Container, class AllocatorT>
+buffer(Container&, AllocatorT, const property_list& = {})
+    -> buffer<typename Container::value_type, 1, AllocatorT>;
+
+template <class Container>
+buffer(Container&, const property_list& = {})
+    -> buffer<typename Container::value_type, 1>;
 
 template <class T, int dimensions, class AllocatorT>
 buffer(const T *, const range<dimensions> &, AllocatorT, const property_list & = {})
@@ -1166,5 +1298,19 @@ extract_buffer_range(const buffer<T, dimensions, AllocatorT> &buff) {
 
 } // sycl
 } // hipsycl
+
+namespace std {
+
+template <typename T, int dimensions,
+          typename AllocatorT>
+struct hash<hipsycl::sycl::buffer<T, dimensions, AllocatorT>>
+{
+  std::size_t
+  operator()(const hipsycl::sycl::buffer<T, dimensions, AllocatorT> &b) const {
+    return b.hipSYCL_hash_code();
+  }
+};
+
+}
 
 #endif

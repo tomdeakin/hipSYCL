@@ -26,8 +26,12 @@
  */
 
 #include "hipSYCL/runtime/cuda/cuda_hardware_manager.hpp"
+#include "hipSYCL/runtime/cuda/cuda_event_pool.hpp"
+#include "hipSYCL/runtime/cuda/cuda_allocator.hpp"
+#include "hipSYCL/runtime/device_id.hpp"
 #include "hipSYCL/runtime/error.hpp"
 #include "hipSYCL/runtime/hardware.hpp"
+
 
 #include <cuda_runtime_api.h>
 #include <exception>
@@ -55,7 +59,7 @@ cuda_hardware_manager::cuda_hardware_manager(hardware_platform hw_platform)
   }
   
   for (int dev = 0; dev < num_devices; ++dev) {
-    _devices.push_back(std::move(cuda_hardware_context{dev}));
+    _devices.emplace_back(dev);
   }
 
 }
@@ -88,7 +92,8 @@ device_id cuda_hardware_manager::get_device_id(std::size_t index) const {
 }
 
 
-cuda_hardware_context::cuda_hardware_context(int dev) : _dev{dev} {
+cuda_hardware_context::cuda_hardware_context(int dev) 
+  : _dev{dev} {
   _properties = std::make_unique<cudaDeviceProp>();
   auto err = cudaGetDeviceProperties(_properties.get(), dev);
 
@@ -98,6 +103,18 @@ cuda_hardware_context::cuda_hardware_context(int dev) : _dev{dev} {
         error_info{"cuda_hardware_manager: Could not query device properties ",
                    error_code{"CUDA", err}});
   }
+
+  _allocator = std::make_unique<cuda_allocator>(
+      backend_descriptor{hardware_platform::cuda, api_platform::cuda}, _dev);
+  _event_pool = std::make_unique<cuda_event_pool>(_dev);
+}
+
+cuda_allocator* cuda_hardware_context::get_allocator() const {
+  return _allocator.get();
+}
+
+cuda_event_pool* cuda_hardware_context::get_event_pool() const {
+  return _event_pool.get();
 }
 
 bool cuda_hardware_context::is_cpu() const {
@@ -147,8 +164,9 @@ bool cuda_hardware_context::has(device_support_aspect aspect) const {
   case device_support_aspect::global_mem_cache_read_only:
     return false;
     break;
-  case device_support_aspect::global_mem_cache_write_only:
-    return false;
+  case device_support_aspect::global_mem_cache_read_write:
+    // NVIDIA GPUs have read/write cache at least since Fermi architecture
+    return true;
     break;
   case device_support_aspect::images:
     return false;
@@ -182,6 +200,13 @@ bool cuda_hardware_context::has(device_support_aspect aspect) const {
   case device_support_aspect::execution_timestamps:
     return true;
     break;
+  case device_support_aspect::sscp_kernels:
+#ifdef HIPSYCL_WITH_SSCP_COMPILER
+    return true;
+#else
+    return false;
+#endif
+    break;
   }
   assert(false && "Unknown device aspect");
   std::terminate();
@@ -194,19 +219,34 @@ cuda_hardware_context::get_property(device_uint_property prop) const {
     return _properties->multiProcessorCount;
     break;
   case device_uint_property::max_global_size0:
-    return _properties->maxThreadsPerBlock * _properties->maxGridSize[0];
+    return static_cast<std::size_t>(_properties->maxThreadsDim[0]) *
+                                    _properties->maxGridSize[0];
     break;
   case device_uint_property::max_global_size1:
-    return _properties->maxThreadsPerBlock * _properties->maxGridSize[1];
+    return static_cast<std::size_t>(_properties->maxThreadsDim[1]) *
+                                    _properties->maxGridSize[1];
     break;
   case device_uint_property::max_global_size2:
-    return _properties->maxThreadsPerBlock * _properties->maxGridSize[2];
+    return static_cast<std::size_t>(_properties->maxThreadsDim[2]) *
+                                    _properties->maxGridSize[2];
+    break;
+  case device_uint_property::max_group_size0:
+    return _properties->maxThreadsDim[0];
+    break;
+  case device_uint_property::max_group_size1:
+    return _properties->maxThreadsDim[1];
+    break;
+  case device_uint_property::max_group_size2:
+    return _properties->maxThreadsDim[2];
     break;
   case device_uint_property::max_group_size:
     return _properties->maxThreadsPerBlock;
     break;
   case device_uint_property::max_num_sub_groups:
     return _properties->maxThreadsPerBlock / _properties->warpSize;
+    break;
+  case device_uint_property::needs_dimension_flip:
+    return true;
     break;
   case device_uint_property::preferred_vector_width_char:
     return 4;
@@ -359,6 +399,9 @@ std::string cuda_hardware_context::get_profile() const {
 
 cuda_hardware_context::~cuda_hardware_context(){}
 
+unsigned cuda_hardware_context::get_compute_capability() const {
+  return _properties->major * 10 + _properties->minor;
+}
 
 }
 }

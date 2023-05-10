@@ -173,6 +173,13 @@ public:
     return multi_ptr<void, Space>{reinterpret_cast<void*>(_ptr)};
   }
 
+  // Implicit conversion to multi_ptr<const value_type, Space>.
+  HIPSYCL_UNIVERSAL_TARGET
+  operator multi_ptr<const ElementType, Space>() const
+  {
+    return multi_ptr<const ElementType, Space>{_ptr};
+  }
+
   // Arithmetic operators
   HIPSYCL_UNIVERSAL_TARGET
   friend multi_ptr& operator++(multi_ptr<ElementType, Space>& mp)
@@ -333,6 +340,18 @@ public:
     return lhs.get() == rhs.get();
   }
 
+  HIPSYCL_UNIVERSAL_TARGET
+  friend bool operator==(const multi_ptr<ElementType, Space>& lhs,
+                         std::nullptr_t)
+  {
+    return lhs.get() == nullptr;
+  }
+
+  HIPSYCL_UNIVERSAL_TARGET
+  friend bool operator==(std::nullptr_t, const multi_ptr<ElementType, Space>& rhs)
+  {
+    return nullptr == rhs.get();
+  }
 
   HIPSYCL_UNIVERSAL_TARGET
   void prefetch(size_t) const

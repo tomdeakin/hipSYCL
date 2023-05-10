@@ -35,11 +35,6 @@
 namespace hipsycl {
 namespace rt {
 
-void generic_pointer_free(device_id d, void* ptr)
-{
-  application::get_backend(d.get_backend()).get_allocator(d)->free(ptr);
-}
-
 data_user_tracker::data_user_tracker(const data_user_tracker& other){
   _users = other._users;
 }
@@ -87,25 +82,10 @@ void data_user_tracker::release_dead_users()
                                 auto u = user.user.lock();
                                 if (!u)
                                   return true;
-                                return u->is_complete();
+                                return u->is_known_complete();
                               }),
                _users.end());
 }
-
-void data_user_tracker::add_user(
-  dag_node_ptr user, 
-  sycl::access::mode mode, 
-  sycl::access::target target, 
-  id<3> offset, 
-  range<3> range)
-{
-  std::lock_guard<std::mutex> lock{_lock};
-
-  _users.push_back(
-      data_user{std::weak_ptr<dag_node>(user), mode, target, offset, range});
-}
-
-
 
 range_store::range_store(range<3> size)
 : _size{size}, _contained_data(size.size())

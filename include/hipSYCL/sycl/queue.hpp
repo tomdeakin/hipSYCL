@@ -34,7 +34,10 @@
 #include "hipSYCL/runtime/application.hpp"
 #include "hipSYCL/runtime/error.hpp"
 #include "hipSYCL/runtime/hints.hpp"
-
+#include "hipSYCL/runtime/inorder_executor.hpp"
+#include "hipSYCL/runtime/inorder_queue.hpp"
+#include "hipSYCL/runtime/runtime.hpp"
+#include "hipSYCL/sycl/backend.hpp"
 #include "types.hpp"
 #include "exception.hpp"
 
@@ -48,6 +51,7 @@
 #include "info/info.hpp"
 #include "detail/function_set.hpp"
 
+#include <cstddef>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -92,6 +96,8 @@ struct hipSYCL_prefer_execution_lane : public detail::cg_property{
   const std::size_t lane;
 };
 
+struct hipSYCL_coarse_grained_events : public detail::cg_property {};
+
 }
 
 
@@ -102,6 +108,16 @@ class in_order : public detail::queue_property
 
 class enable_profiling : public detail::property
 {};
+
+class hipSYCL_coarse_grained_events : public detail::queue_property
+{};
+
+struct hipSYCL_priority : public detail::queue_property {
+  hipSYCL_priority(int queue_execution_priority)
+  : priority{queue_execution_priority} {}
+
+  int priority;
+};
 
 }
 
@@ -221,7 +237,7 @@ public:
           rt::make_execution_hint<rt::hints::bind_to_device_group>(rt_devs));
     }
     // Otherwise we are in completely unrestricted scheduling land - don't
-    // add any hints
+    // add any hints regarding target device.
 
     this->init();
   }
@@ -284,8 +300,24 @@ public:
   }
 
   void wait() {
-    rt::application::dag().flush_sync();
-    rt::application::dag().wait(_node_group_id);
+    if(_is_in_order) {
+      rt::dag_node_ptr most_recent_event = nullptr;
+      {
+        std::lock_guard<std::mutex> lock{*_lock};
+
+        most_recent_event = _previous_submission->lock();
+      }
+      if(most_recent_event) {
+        
+        if(!most_recent_event->is_submitted())
+          _requires_runtime.get()->dag().flush_sync();
+        
+        most_recent_event->wait();
+      }
+    } else {
+      _requires_runtime.get()->dag().flush_sync();
+      _requires_runtime.get()->dag().wait(_node_group_id);
+    }
   }
 
   void wait_and_throw() {
@@ -297,8 +329,8 @@ public:
     glue::throw_asynchronous_errors(_handler);
   }
 
-  template <info::queue param>
-  typename info::param_traits<info::queue, param>::return_type get_info() const;
+  template <typename Param>
+  typename Param::return_type get_info() const;
 
 
   template <typename T>
@@ -337,10 +369,15 @@ public:
       hints.overwrite_with(
           rt::make_execution_hint<rt::hints::prefer_execution_lane>(lane_id));
     }
+    if (prop_list.has_property<
+            property::command_group::hipSYCL_coarse_grained_events>()) {
+      hints.overwrite_with(
+          rt::make_execution_hint<rt::hints::coarse_grained_synchronization>());
+    }
     // Should always have node_group hint from default hints
     assert(hints.has_hint<rt::hints::node_group>());
 
-    handler cgh{get_context(), _handler, hints};
+    handler cgh{get_context(), _handler, hints, _requires_runtime.get()};
     
     apply_preferred_group_size<1>(prop_list, cgh);
     apply_preferred_group_size<2>(prop_list, cgh);
@@ -360,26 +397,26 @@ public:
   }
 
   template <typename T>
-  event submit(T cgf, const queue &secondaryQueue,
+  event submit(T cgf, queue &secondaryQueue,
                const property_list &prop_list = {}) {
     try {
 
       size_t num_errors_begin =
-          rt::application::get_runtime().errors().num_errors();
+          rt::application::errors().num_errors();
 
       event evt = submit(prop_list, cgf);
       // Flush so that we see any errors during submission
-      rt::application::dag().flush_sync();
+      _requires_runtime.get()->dag().flush_sync();
 
       size_t num_errors_end =
-          rt::application::get_runtime().errors().num_errors();
+          rt::application::errors().num_errors();
 
       bool submission_failed = false;
       // TODO This approach fails if an async handler has consumed
       // the errors in the meantime
       if(num_errors_end != num_errors_begin) {
         // Need to check if there was a kernel error..
-        rt::application::get_runtime().errors().for_each_error(
+        rt::application::errors().for_each_error(
             [&](const rt::result &err) {
               if (!err.is_success()) {
                 if (err.info().get_error_type() ==
@@ -411,8 +448,8 @@ public:
     if(is_in_order()) {
       std::lock_guard<std::mutex> lock{*_lock};
 
-      if(auto prev = this->_previous_submission.lock()){
-        if(!prev->is_complete()) {
+      if(auto prev = this->_previous_submission->lock()){
+        if(!prev->is_known_complete()) {
           return std::vector<event>{event{prev, _handler}};
         }
       }
@@ -423,11 +460,11 @@ public:
     } else {
       // for non-in-order queues we need to ask the runtime for
       // all nodes of this node group
-      rt::application::dag().flush_sync();
-      auto nodes = rt::application::dag().get_group(_node_group_id);
+      _requires_runtime.get()->dag().flush_sync();
+      auto nodes = _requires_runtime.get()->dag().get_group(_node_group_id);
       std::vector<event> evts;
       for(auto node : nodes){
-        if(!node->is_complete())
+        if(!node->is_known_complete())
           evts.push_back(event{node, _handler});
       }
 
@@ -847,7 +884,9 @@ public:
     });  
   }
 
-
+  std::size_t hipSYCL_hash_code() const {
+    return _node_group_id;
+  }
 private:
   template<int Dim>
   void apply_preferred_group_size(const property_list& prop_list, handler& cgh) {
@@ -864,7 +903,7 @@ private:
   template <class Cgf>
   rt::dag_node_ptr execute_submission(Cgf cgf, handler &cgh) {
     if (is_in_order()) {
-      auto previous = _previous_submission.lock();
+      auto previous = _previous_submission->lock();
       if(previous)
         cgh.depends_on(event{previous, _handler});
     }
@@ -873,7 +912,7 @@ private:
 
     rt::dag_node_ptr node = this->extract_dag_node(cgh);
     if (is_in_order()) {
-      _previous_submission = node;
+      *_previous_submission = node;
     }
     return node;
   }
@@ -931,9 +970,36 @@ private:
           rt::make_execution_hint<
               rt::hints::request_instrumentation_finish_timestamp>());
     }
+    if(this->has_property<property::queue::hipSYCL_coarse_grained_events>()){
+      _default_hints.add_hint(
+          rt::make_execution_hint<rt::hints::coarse_grained_synchronization>());
+    }
 
     _is_in_order = this->has_property<property::queue::in_order>();
     _lock = std::make_shared<std::mutex>();
+    _previous_submission = std::make_shared<std::weak_ptr<rt::dag_node>>();
+
+    if(_is_in_order && get_devices().size() == 1) {
+      int priority = 0;
+      if(this->has_property<property::queue::hipSYCL_priority>()) {
+        priority = this->get_property<property::queue::hipSYCL_priority>().priority;
+      }
+
+      rt::device_id rt_dev = detail::extract_rt_device(this->get_device());
+      // Dedicated executor may not be supported by all backends,
+      // so this might return nullptr.
+      std::shared_ptr<rt::backend_executor> dedicated_executor =
+          _requires_runtime.get()
+              ->backends()
+              .get(rt_dev.get_backend())
+              ->create_inorder_executor(rt_dev, priority);
+      
+      if(dedicated_executor) {
+        _default_hints.add_hint(
+            rt::make_execution_hint<rt::hints::prefer_executor>(
+                dedicated_executor));
+      }
+    }
 
     this->_hooks = detail::queue_submission_hooks_ptr{
           new detail::queue_submission_hooks{}};
@@ -944,7 +1010,8 @@ private:
   {
     return _hooks;
   }
-  
+
+  rt::runtime_keep_alive_token _requires_runtime;  
   detail::queue_submission_hooks_ptr _hooks;
 
   rt::execution_hints _default_hints;
@@ -952,7 +1019,7 @@ private:
   async_handler _handler;
   bool _is_in_order;
 
-  std::weak_ptr<rt::dag_node> _previous_submission;
+  std::shared_ptr<std::weak_ptr<rt::dag_node>> _previous_submission;
   std::shared_ptr<std::mutex> _lock;
   std::size_t _node_group_id;
 };
@@ -1098,6 +1165,16 @@ inline auto automatic_require(queue &q,
 }// namespace sycl
 }// namespace hipsycl
 
+namespace std {
+template <>
+struct hash<hipsycl::sycl::queue>
+{
+  std::size_t operator()(const hipsycl::sycl::queue& q) const
+  {
+    return q.hipSYCL_hash_code();
+  }
+};
 
+}
 
 #endif

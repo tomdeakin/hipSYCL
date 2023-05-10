@@ -83,8 +83,8 @@ bool omp_hardware_context::has(device_support_aspect aspect) const {
   case device_support_aspect::global_mem_cache_read_only:
     return false;
     break;
-  case device_support_aspect::global_mem_cache_write_only:
-    return false;
+  case device_support_aspect::global_mem_cache_read_write:
+    return true;
     break;
   case device_support_aspect::images:
     return false;
@@ -121,6 +121,9 @@ bool omp_hardware_context::has(device_support_aspect aspect) const {
   case device_support_aspect::execution_timestamps:
     return true;
     break;
+  case device_support_aspect::sscp_kernels:
+    return false;
+    break;
   }
   assert(false && "Unknown device aspect");
   return false;
@@ -141,11 +144,23 @@ omp_hardware_context::get_property(device_uint_property prop) const {
   case device_uint_property::max_global_size2:
     return std::numeric_limits<std::size_t>::max();
     break;
+  case device_uint_property::max_group_size0:
+    return 1024;
+    break;
+  case device_uint_property::max_group_size1:
+    return 1024;
+    break;
+  case device_uint_property::max_group_size2:
+    return 1024;
+    break;
   case device_uint_property::max_group_size:
-    return std::numeric_limits<std::size_t>::max();
+    return 1024;
     break;
   case device_uint_property::max_num_sub_groups:
     return std::numeric_limits<std::size_t>::max();
+    break;
+  case device_uint_property::needs_dimension_flip:
+    return true;
     break;
   case device_uint_property::preferred_vector_width_char:
     return 4;
@@ -266,9 +281,9 @@ omp_hardware_context::get_property(device_uint_property prop) const {
   return 0;
 }
 
-std::vector<std::size_t>
-omp_hardware_context::get_property(device_uint_list_property prop) const {
-  switch (prop) {
+std::vector<std::size_t> omp_hardware_context::get_property(device_uint_list_property prop) const
+{
+  switch(prop) {
   case device_uint_list_property::sub_group_sizes:
     return std::vector<std::size_t>{1};
     break;

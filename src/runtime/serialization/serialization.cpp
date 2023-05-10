@@ -109,7 +109,8 @@ void kernel_operation::dump(std::ostream &ostr, int indentation) const {
   std::string indent = get_indentation(indentation);
   ostr << indent << "kernel: " << _kernel_name;
   for (auto requirement : _requirements) {
-    ostr << std::endl; requirement->dump(ostr, indentation + 1);
+    ostr << std::endl;
+    requirement->get_operation()->dump(ostr, indentation + 1);
   }
 }
 
@@ -131,7 +132,7 @@ void prefetch_operation::dump(std::ostream& ostr, int indentation) const {
 void memset_operation::dump(std::ostream &ostr, int indentation) const {
   ostr << get_indentation(indentation);
   ostr << "Memset: @" << _ptr << " " << _num_bytes << " bytes of value "
-       << get_pattern();
+       << static_cast<int>(get_pattern());
 }
 
 void memory_location::dump(std::ostream &ostr) const {
@@ -147,8 +148,9 @@ void dag::dump(std::ostream &ostr) const {
     ostr << HIPSYCL_DUMP_INDENTATION << "Has requirement on: ";
     auto requirement_list = node_ptr->get_requirements();
     if (!requirement_list.empty()) {
-      for (auto req : requirement_list) {
-        ostr << req << " ";
+      for (auto weak_req : requirement_list) {
+        if(auto req = weak_req.lock())
+          ostr << req << " ";
       }
     } else {
       std::cout << "None";

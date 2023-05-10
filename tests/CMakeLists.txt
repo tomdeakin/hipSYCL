@@ -1,11 +1,13 @@
-project(hipsycl-tests)
+project(opensycl-tests)
 cmake_minimum_required(VERSION 3.12)
 
 set(Boost_USE_STATIC_LIBS off)
 set(BUILD_SHARED_LIBS on)
+set(REDUCED_LOCAL_MEM_USAGE OFF CACHE BOOL "Only run tests with reduced local memory usage to allow running on hardware with little local memory.")
+
 find_package(Boost COMPONENTS unit_test_framework REQUIRED)
 
-find_package(hipSYCL REQUIRED)
+find_package(OpenSYCL REQUIRED)
 
 find_package(Threads REQUIRED)
 
@@ -13,13 +15,13 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-if(NOT HIPSYCL_DEBUG_LEVEL)
+if(NOT OPENSYCL_DEBUG_LEVEL)
   if(CMAKE_BUILD_TYPE MATCHES "Debug")
-    set(HIPSYCL_DEBUG_LEVEL 3 CACHE INTEGER
+    set(OPENSYCL_DEBUG_LEVEL 3 CACHE STRING
       "Choose the debug level, options are: 0 (no debug), 1 (print errors), 2 (also print warnings), 3 (also print general information)"
     FORCE)
   else()
-    set(HIPSYCL_DEBUG_LEVEL 2 CACHE INTEGER
+    set(OPENSYCL_DEBUG_LEVEL 2 CACHE STRING
       "Choose the debug level, options are: 0 (no debug), 1 (print errors), 2 (also print warnings), 3 (also print general information)"
       FORCE)
   endif()
@@ -33,10 +35,14 @@ if(CMAKE_GENERATOR STREQUAL "Ninja" AND
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdiagnostics-color=always")
 endif()
 
-#add_compile_definitions(HIPSYCL_DEBUG_LEVEL="${HIPSYCL_DEBUG_LEVEL}")
+if(REDUCED_LOCAL_MEM_USAGE)
+  add_definitions(-DREDUCED_LOCAL_MEM_USAGE)
+endif()
+
+
 #Use add_definitions for now for older cmake versions
 cmake_policy(SET CMP0005 NEW)
-add_definitions(-DHIPSYCL_DEBUG_LEVEL=${HIPSYCL_DEBUG_LEVEL})
+add_definitions(-DHIPSYCL_DEBUG_LEVEL=${OPENSYCL_DEBUG_LEVEL})
 if(HIPSYCL_DISABLE_UNNAMED_LAMBDA_TESTS)
   add_definitions(-DHIPSYCL_DISABLE_UNNAMED_LAMBDA_TESTS)
 endif()
@@ -64,12 +70,17 @@ add_executable(sycl_tests
   sycl/group_functions/group_functions_binary_reduce.cpp
   sycl/group_functions/group_functions_reduce.cpp
   sycl/group_functions/group_functions_scan.cpp
+  sycl/half.cpp
   sycl/id_range.cpp
+  sycl/info_queries.cpp
   sycl/item.cpp
   sycl/kernel_invocation.cpp
   sycl/math.cpp
+  sycl/marray.cpp
   sycl/profiler.cpp
   sycl/reduction.cpp
+  sycl/reference_semantics.cpp
+  sycl/relational.cpp
   sycl/sub_group.cpp
   sycl/sycl_test_suite.cpp 
   sycl/usm.cpp
@@ -88,3 +99,5 @@ add_executable(rt_tests
 target_include_directories(rt_tests PRIVATE ${Boost_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(rt_tests PRIVATE ${Boost_LIBRARIES} Threads::Threads)
 add_sycl_to_target(TARGET rt_tests)
+
+add_subdirectory(compiler)

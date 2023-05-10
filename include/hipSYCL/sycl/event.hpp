@@ -40,6 +40,7 @@
 #include "hipSYCL/runtime/dag_node.hpp"
 #include "hipSYCL/runtime/application.hpp"
 #include "hipSYCL/runtime/instrumentation.hpp"
+#include <cstddef>
 
 namespace hipsycl {
 namespace sycl {
@@ -61,9 +62,10 @@ public:
     if(_node) {
       std::vector<event> events;
 
-      for(auto node : _node->get_requirements()) {
+      for(auto weak_node : _node->get_requirements()) {
         // TODO Is it correct to just use our handler here?
-        events.push_back(event{node, _handler});
+        if(auto node = weak_node.lock())
+          events.push_back(event{node, _handler});
       }
 
       return events;
@@ -76,7 +78,7 @@ public:
   {
     if(this->_node){
       if(!this->_node->is_submitted())
-        rt::application::dag().flush_sync();
+        _requires_runtime.get()->dag().flush_sync();
       
       assert(this->_node->is_submitted());
       this->_node->wait();
@@ -85,6 +87,7 @@ public:
 
   static void wait(const vector_class<event> &eventList)
   {
+    rt::runtime_keep_alive_token requires_runtime;
     // Only need a at most a single flush,
     // so check if any of the events are unsubmitted,
     // if so, perform a single flush.
@@ -95,7 +98,7 @@ public:
           flush = true;
 
     if(flush)
-      rt::application::dag().flush_sync();
+      requires_runtime.get()->dag().flush_sync();
 
     for(const event& evt: eventList){
       const_cast<event&>(evt).wait();
@@ -120,16 +123,16 @@ public:
       glue::throw_asynchronous_errors(eventList.front()._handler);
   }
 
-  template <info::event param>
-  typename info::param_traits<info::event, param>::return_type get_info() const;
+  template <typename Param>
+  typename Param::return_type get_info() const;
 
   // Wait for and retrieve profiling timestamps. Supports all handler operations except
   // handler::require() and handler::update_host().
   // Will throw sycl::invalid_object_error unless the queue was constructed with
   // `property::queue::enable_profiling`.
   // Timestamps are returned in std::chrono::system_clock nanoseconds-since-epoch.
-  template <info::event_profiling param>
-  typename info::param_traits<info::event_profiling, param>::return_type get_profiling_info() const
+  template <typename Param>
+  typename Param::return_type get_profiling_info() const
   {
     if(!_node) {
       throw invalid_object_error{rt::make_error(
@@ -143,7 +146,7 @@ public:
     // but the user thread waits for the instrumentation results
     // and so cannot submit more work.
     if(!this->_node->is_submitted())
-      rt::application::dag().flush_sync();
+      _requires_runtime.get()->dag().flush_sync();
 
     rt::execution_hints& hints = _node->get_execution_hints();
     // The regular SYCL API will always result in full profiling requested,
@@ -168,7 +171,7 @@ public:
            rt::error_type::invalid_object_error})};
     }
 
-    if (param == info::event_profiling::command_submit) {
+    if (std::is_same_v<Param, info::event_profiling::command_submit>) {
       auto submission =
           _node->get_operation()
               ->get_instrumentations()
@@ -179,7 +182,7 @@ public:
               "Operation not profiled: No submission timestamp available");
 
       return rt::profiler_clock::ns_ticks(submission->get_time_point());
-    } else if (param == info::event_profiling::command_start) {
+    } else if (std::is_same_v<Param, info::event_profiling::command_start>) {
       auto start =
           _node->get_operation()
               ->get_instrumentations()
@@ -190,7 +193,7 @@ public:
               "Operation not profiled: No execution start timestamp available");
 
       return rt::profiler_clock::ns_ticks(start->get_time_point());
-    } else if (param == info::event_profiling::command_end) {
+    } else if (std::is_same_v<Param, info::event_profiling::command_end>) {
       auto finish =
           _node->get_operation()
               ->get_instrumentations()
@@ -212,9 +215,14 @@ public:
   friend bool operator !=(const event& lhs, const event& rhs)
   { return !(lhs == rhs); }
 
+  std::size_t hipSYCL_hash_code() const {
+    return std::hash<void*>{}(_node.get());
+  }
+
 private:
 
   rt::dag_node_ptr _node;
+  rt::runtime_keep_alive_token _requires_runtime;
   async_handler _handler;
 };
 
@@ -237,5 +245,18 @@ HIPSYCL_SPECIALIZE_GET_INFO(event, reference_count)
 
 } // namespace sycl
 } // namespace hipsycl
+
+namespace std {
+
+template <>
+struct hash<hipsycl::sycl::event>
+{
+  std::size_t operator()(const hipsycl::sycl::event& e) const
+  {
+    return e.hipSYCL_hash_code();
+  }
+};
+
+}
 
 #endif

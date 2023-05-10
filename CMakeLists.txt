@@ -5,7 +5,7 @@ endif()
 
 set(HIPSYCL_VERSION_MAJOR 0)
 set(HIPSYCL_VERSION_MINOR 9)
-set(HIPSYCL_VERSION_PATCH 1)
+set(HIPSYCL_VERSION_PATCH 4)
 
 project(hipSYCL VERSION ${HIPSYCL_VERSION_MAJOR}.${HIPSYCL_VERSION_MINOR}.${HIPSYCL_VERSION_PATCH})
 
@@ -78,23 +78,56 @@ endif()
 
 set(WITH_CUDA_BACKEND ${CUDA_FOUND} CACHE BOOL "Build hipSYCL support for NVIDIA GPUs with CUDA")
 set(WITH_ROCM_BACKEND ${ROCM_FOUND} CACHE BOOL "Build hipSYCL support for AMD GPUs with ROCm")
+set(WITH_CUDA_NVCXX_ONLY FALSE CACHE BOOL "Whether to target CUDA exclusively with nvc++")
 
+if(APPLE OR WIN32 OR WITH_CUDA_NVCXX_ONLY)
+  set(WITH_ACCELERATED_CPU false CACHE BOOL "Build hipSYCL compiler support for accelerating the CPU backend")
+  set(WITH_SSCP_COMPILER false CACHE BOOL "Build hipSYCL generic SSCP compiler support")
+else()
+  set(WITH_ACCELERATED_CPU true CACHE BOOL "Build hipSYCL compiler support for accelerating the CPU backend")
+  set(WITH_SSCP_COMPILER true CACHE BOOL "Build hipSYCL generic SSCP compiler support")
+endif()
 set(WITH_CPU_BACKEND true)
 
 if(WITH_CUDA_BACKEND)
   set(DEFAULT_PLATFORM "cuda")
   find_library(CUDA_DRIVER_LIBRARY cuda HINTS ${CUDA_TOOLKIT_ROOT_DIR}/lib64/stubs ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64 REQUIRED)
   message(STATUS "Found CUDA driver library: ${CUDA_DRIVER_LIBRARY}")
+
+  find_program(NVCXX_COMPILER NAMES nvc++)
 elseif(WITH_ROCM_BACKEND)
   set(DEFAULT_PLATFORM "rocm")
 else()
   set(DEFAULT_PLATFORM "cpu")
 endif()
 
-if(WITH_CUDA_BACKEND OR WITH_ROCM_BACKEND)
-  set(BUILD_CLANG_PLUGIN true)
+if(WITH_CUDA_NVCXX_ONLY)
+  if(NVCXX_COMPILER MATCHES "-NOTFOUND")
+      message(SEND_ERROR "Could not find nvc++ executable, specifiy with -DNVCXX_COMPILER=")
+  endif()
 endif()
 
+
+if(WITH_ACCELERATED_CPU) # sanitize input
+  set(WITH_ACCELERATED_CPU true)
+  set(BUILD_CLANG_PLUGIN true)
+else()
+  set(WITH_ACCELERATED_CPU false)
+endif()
+
+if(WITH_SSCP_COMPILER) # sanitize input
+  set(WITH_SSCP_COMPILER true)
+  set(BUILD_CLANG_PLUGIN true)
+else()
+  set(WITH_SSCP_COMPILER false)
+endif()
+
+if(WITH_CUDA_BACKEND AND NOT WITH_CUDA_NVCXX_ONLY)
+  set(BUILD_CLANG_PLUGIN true)
+endif()
+if(WITH_ROCM_BACKEND)
+  set(BUILD_CLANG_PLUGIN true)
+endif()
 
 if(BUILD_CLANG_PLUGIN)
   find_package(LLVM CONFIG)
@@ -117,8 +150,8 @@ if(BUILD_CLANG_PLUGIN)
   endif()
   message(STATUS "Selecting clang: ${CLANG_EXECUTABLE_PATH}")
 
-  get_filename_component(LLVM_BIN_DIR ${CLANG_EXECUTABLE_PATH} DIRECTORY)
-  get_filename_component(LLVM_PREFIX_DIR ${LLVM_BIN_DIR} DIRECTORY)
+  get_filename_component(LLVM_BIN_DIR "${CLANG_EXECUTABLE_PATH}" DIRECTORY)
+  get_filename_component(LLVM_PREFIX_DIR "${LLVM_BIN_DIR}" DIRECTORY)
   # The path to the internal clang includes is currently required on ROCm
   # to let syclcc-clang fix a wrong order of system includes (clang's internal 
   # includes are not of high enough priority in the include path search order).
@@ -131,6 +164,7 @@ if(BUILD_CLANG_PLUGIN)
     ${LLVM_PREFIX_DIR}/lib/clang/${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}/include
     ${LLVM_PREFIX_DIR}/lib/clang/${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}/include
     ${LLVM_PREFIX_DIR}/lib/clang/${LLVM_VERSION_MAJOR}/include
+    ${LLVM_PREFIX_DIR}/lib64/clang/${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}/include
     DOC "Path to internal clang headers. Typically, $LLVM_INSTALL_PREFIX/include/clang/<llvm-version>/include")
 
   if(EXISTS ${FOUND_CLANG_INCLUDE_PATH})
@@ -141,6 +175,33 @@ if(BUILD_CLANG_PLUGIN)
   if(NOT EXISTS ${CLANG_INCLUDE_PATH})
     message(SEND_ERROR "clang include path ${CLANG_INCLUDE_PATH} does not exist. Please provide clang's internal include path manually: Find the directory where __clang_cuda_runtime_wrapper.h is. Provide this directory for older ROCm versions and the parent directory for newer ones.")
   endif()
+  if(WITH_ROCM_BACKEND)
+    execute_process(COMMAND ${CLANG_EXECUTABLE_PATH} "--version"
+      OUTPUT_VARIABLE CLANG_VERBOSE_OUTPUT)
+    string(REGEX MATCH "clang version [0-9]+.[0-9]+.[0-9]+ \\(.+ roc-([0-9]+).([0-9]+).([0-9]+)" AMD_CLANG_VERSION ${CLANG_VERBOSE_OUTPUT})
+
+    if(AMD_CLANG_VERSION)
+      set(ROCM_VERSION_MAJOR ${CMAKE_MATCH_1})
+      set(ROCM_VERSION_MINOR ${CMAKE_MATCH_2})
+      set(ROCM_VERSION_PATCH ${CMAKE_MATCH_3})
+      message(STATUS "AMD clang version: ${ROCM_VERSION_MAJOR}.${ROCM_VERSION_MINOR}.${ROCM_VERSION_PATCH}")
+
+      if(${LLVM_VERSION_MAJOR} EQUAL 13 AND NOT DEFINED HIPSYCL_NO_DEVICE_MANGLER)
+        message(SEND_ERROR "AMD clang version not compatible with hipSYCL explicit multipass. "
+                           "To disable explicit multipass set -DHIPSYCL_NO_DEVICE_MANGLER=ON. "
+                           "This also disables simultaneous compilation for CUDA and HIP devices.")
+      endif()
+    endif()
+  endif()
+  if(${LLVM_VERSION_MAJOR} LESS 11 AND ${WITH_ACCELERATED_CPU})
+    message(WARNING "clang version too old (${LLVM_VERSION_MAJOR} < 11) to be used with CPU acceleration support, disabling WITH_ACCELERATED_CPU")
+    set(WITH_ACCELERATED_CPU false)
+  endif()
+  if(${LLVM_VERSION_MAJOR} LESS 14 AND ${WITH_SSCP_COMPILER})
+    message(WARNING "clang version too old (${LLVM_VERSION_MAJOR} < 14) to be used with SSCP compiler, disabling WITH_SSCP_COMPILER")
+    set(WITH_SSCP_COMPILER false)
+  endif()
+
   message(STATUS "Using clang include directory: ${CLANG_INCLUDE_PATH}")
 endif()
 
@@ -148,6 +209,7 @@ endif()
 #Use add_definitions for now for older cmake versions
 cmake_policy(SET CMP0005 NEW)
 add_definitions(-DHIPSYCL_DEBUG_LEVEL=${HIPSYCL_DEBUG_LEVEL})
+option(HIPSYCL_NO_DEVICE_MANGLER "Disable the use of DeviceMangler. necessary for LLVM 13 distributed with the rocm packages." OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -166,15 +228,15 @@ else()
 endif()
 
 if(Boost_FIBER_LIBRARY_DEBUG)
-  get_filename_component(Boost_LIBRARY_DIR ${Boost_FIBER_LIBRARY_DEBUG} DIRECTORY)
+  get_filename_component(Boost_LIBRARY_DIR "${Boost_FIBER_LIBRARY_DEBUG}" DIRECTORY)
 elseif(Boost_FIBER_LIBRARY_RELEASE)
-  get_filename_component(Boost_LIBRARY_DIR ${Boost_FIBER_LIBRARY_RELEASE} DIRECTORY)
+  get_filename_component(Boost_LIBRARY_DIR "${Boost_FIBER_LIBRARY_RELEASE}" DIRECTORY)
 else()
   get_target_property(FIBER_IMPORT_LIBRARY Boost::fiber IMPORTED_LOCATION_DEBUG)
   if(NOT FIBER_IMPORT_LIBRARY)
     get_target_property(FIBER_IMPORT_LIBRARY Boost::fiber IMPORTED_LOCATION_RELEASE)
   endif()
-  get_filename_component(Boost_LIBRARY_DIR "${FIBER_IMPORT_LIBRARY}" ABSOLUTE)
+  get_filename_component(Boost_LIBRARY_DIR "${FIBER_IMPORT_LIBRARY}" DIRECTORY)
   get_target_property(Boost_INCLUDE_DIR Boost::fiber INTERFACE_INCLUDE_DIRECTORIES)
 endif()
 
@@ -203,11 +265,11 @@ else()
 endif()
 
 if(CMAKE_BUILD_TYPE MATCHES Debug)
-  get_filename_component(Boost_CONTEXT_LIBRARY_NAME ${Boost_CONTEXT_LIBRARY_DEBUG} NAME)
-  get_filename_component(Boost_FIBER_LIBRARY_NAME ${Boost_FIBER_LIBRARY_DEBUG} NAME)
+  get_filename_component(Boost_CONTEXT_LIBRARY_NAME "${Boost_CONTEXT_LIBRARY_DEBUG}" NAME)
+  get_filename_component(Boost_FIBER_LIBRARY_NAME "${Boost_FIBER_LIBRARY_DEBUG}" NAME)
 else()
-  get_filename_component(Boost_CONTEXT_LIBRARY_NAME ${Boost_CONTEXT_LIBRARY_RELEASE} NAME)
-  get_filename_component(Boost_FIBER_LIBRARY_NAME ${Boost_FIBER_LIBRARY_RELEASE} NAME)
+  get_filename_component(Boost_CONTEXT_LIBRARY_NAME "${Boost_CONTEXT_LIBRARY_RELEASE}" NAME)
+  get_filename_component(Boost_FIBER_LIBRARY_NAME "${Boost_FIBER_LIBRARY_RELEASE}" NAME)
 endif()
 set(DEFAULT_WIN32_OMP_LINK_LINE "-L${Boost_LIBRARY_DIR} ${DEFAULT_LINK_PREFIX}${Boost_CONTEXT_LIBRARY_NAME} ${DEFAULT_LINK_PREFIX}${Boost_FIBER_LIBRARY_NAME} ${DEFAULT_OMP_FLAG}")
 set(DEFAULT_WIN32_SEQUENTIAL_LINK_LINE "-L${Boost_LIBRARY_DIR} ${DEFAULT_LINK_PREFIX}${Boost_CONTEXT_LIBRARY_NAME} ${DEFAULT_LINK_PREFIX}${Boost_FIBER_LIBRARY_NAME} -llibomp")
@@ -216,7 +278,7 @@ set(DEFAULT_WIN32_SEQUENTIAL_LINK_LINE "-L${Boost_LIBRARY_DIR} ${DEFAULT_LINK_PR
 set(DEFAULT_APPLE_OMP_LINK_LINE "${DEFAULT_BOOST_LIBRARIES} ${DEFAULT_OMP_FLAG} ${hipSYCL_OpenMP_CXX_LIBRARIES}")
 set(DEFAULT_APPLE_SEQUENTIAL_LINK_LINE "${DEFAULT_BOOST_LIBRARIES} ${hipSYCL_OpenMP_CXX_LIBRARIES}")
 set(DEFAULT_OMP_LINK_LINE "-L${Boost_LIBRARY_DIR} -lboost_context -lboost_fiber -Wl,-rpath=${Boost_LIBRARY_DIR} ${DEFAULT_OMP_FLAG}")
-set(DEFAULT_SEQUENTIAL_LINK_LINE "-L${Boost_LIBRARY_DIR} -lboost_context -lboost_fiber -lomp -Wl,-rpath=${Boost_LIBRARY_DIR}")
+set(DEFAULT_SEQUENTIAL_LINK_LINE "-L${Boost_LIBRARY_DIR} -lboost_context -lboost_fiber -Wl,-rpath=${Boost_LIBRARY_DIR}")
 
 # If no link lines given, set to default.
 if(NOT ROCM_LINK_LINE)
@@ -271,16 +333,29 @@ if(NOT CUDA_CXX_FLAGS)
   set(CUDA_CXX_FLAGS "-U__FLOAT128__ -U__SIZEOF_FLOAT128__ -isystem $HIPSYCL_PATH/include/hipSYCL/std/hiplike" CACHE STRING "Arguments passed to compiler to compile SYCL applications with CUDA")
 endif()
 
+# always need -D_ENABLE_EXTENDED_ALIGNED_STORAGE to allow correctly aligned local memory on CPU
 if(NOT OMP_CXX_FLAGS) 
-  set(OMP_CXX_FLAGS "-I${Boost_INCLUDE_DIR} ${DEFAULT_OMP_FLAG}" CACHE STRING "Arguments passed to compiler to compile SYCL applications with OpenMP")
+  set(OMP_CXX_FLAGS "-I${Boost_INCLUDE_DIR} ${DEFAULT_OMP_FLAG} -D_ENABLE_EXTENDED_ALIGNED_STORAGE" CACHE STRING "Arguments passed to compiler to compile SYCL applications with OpenMP")
 endif()
 
 if(NOT SEQUENTIAL_CXX_FLAGS) 
-  set(SEQUENTIAL_CXX_FLAGS "-I${Boost_INCLUDE_DIR}" CACHE STRING "Arguments passed to compiler to compile SYCL applications on host")
+  set(SEQUENTIAL_CXX_FLAGS "-I${Boost_INCLUDE_DIR} -D_ENABLE_EXTENDED_ALIGNED_STORAGE" CACHE STRING "Arguments passed to compiler to compile SYCL applications on host")
+endif()
+
+if(BUILD_CLANG_PLUGIN)
+  set(PLUGIN_LLVM_VERSION_MAJOR ${LLVM_VERSION_MAJOR})
+else()
+  set(PLUGIN_LLVM_VERSION_MAJOR 0)
 endif()
 
 set(SYCLCC_CONFIG_FILE "{
+  \"version-major\" : \"${HIPSYCL_VERSION_MAJOR}\",
+  \"version-minor\" : \"${HIPSYCL_VERSION_MINOR}\",
+  \"version-patch\" : \"${HIPSYCL_VERSION_PATCH}\",
+  \"plugin-llvm-version-major\" : \"${PLUGIN_LLVM_VERSION_MAJOR}\",
+  \"plugin-with-cpu-acceleration\" : \"${WITH_ACCELERATED_CPU}\",
   \"default-clang\"     : \"${CLANG_EXECUTABLE_PATH}\",
+  \"default-nvcxx\"     : \"${NVCXX_COMPILER}\",
   \"default-platform\"  : \"${DEFAULT_PLATFORM}\",
   \"default-cuda-path\" : \"${CUDA_TOOLKIT_ROOT_DIR}\",
   \"default-gpu-arch\"  : \"${DEFAULT_GPU_ARCH}\",
@@ -288,6 +363,7 @@ set(SYCLCC_CONFIG_FILE "{
   \"default-rocm-path\" : \"${ROCM_PATH}\",
   \"default-use-bootstrap-mode\" : \"false\",
   \"default-is-dryrun\" : \"false\",
+  \"default-use-accelerated-cpu\" : \"${WITH_ACCELERATED_CPU}\",
   \"default-clang-include-path\" : \"${CLANG_INCLUDE_PATH}\",
   \"default-sequential-link-line\" : \"${SEQUENTIAL_LINK_LINE}\",
   \"default-sequential-cxx-flags\" : \"${SEQUENTIAL_CXX_FLAGS}\",
@@ -304,10 +380,9 @@ set(SYCLCC_CONFIG_FILE "{
 
 file(WRITE ${SYCLCC_CONFIG_FILE_PATH} ${SYCLCC_CONFIG_FILE})
 
-set(HIPSYCL_INSTALL_CMAKE_DIR
-  "lib/cmake/${PROJECT_NAME}" CACHE PATH "Install path for CMake config files")
 
-# must stay after add_subdirectory(src) as HIPSYCL_RT_LIBRARY_OUTPUT_NAME is declared there
+
+# must stay after add_subdirectory(src) as HIPSYCL_COMMON_LIBRARY_OUTPUT_NAME is declared there
 configure_file(
   ${PROJECT_SOURCE_DIR}/include/hipSYCL/common/config.hpp.in
   ${PROJECT_BINARY_DIR}/include/hipSYCL/common/config.hpp)
@@ -315,6 +390,7 @@ configure_file(
 install(DIRECTORY include/CL DESTINATION include/ FILES_MATCHING PATTERN "*.hpp")
 install(DIRECTORY include/SYCL DESTINATION include/ FILES_MATCHING PATTERN "*.hpp")
 install(DIRECTORY include/hipSYCL DESTINATION include/ FILES_MATCHING PATTERN "*.hpp")
+install(DIRECTORY include/hipSYCL DESTINATION include/ FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY include/hipSYCL/std DESTINATION include/hipSYCL/ )
 install(FILES ${PROJECT_BINARY_DIR}/include/hipSYCL/common/config.hpp DESTINATION include/hipSYCL/common/)
 
@@ -328,19 +404,19 @@ install(PROGRAMS bin/syclcc-clang DESTINATION bin RENAME syclcc)
 endif()
 install(PROGRAMS bin/syclcc-clang DESTINATION bin)
 
-install(PROGRAMS cmake/syclcc-launcher DESTINATION ${HIPSYCL_INSTALL_CMAKE_DIR})
-install(PROGRAMS cmake/syclcc-launch.rule.in DESTINATION ${HIPSYCL_INSTALL_CMAKE_DIR})
 
 install(FILES ${SYCLCC_CONFIG_FILE_PATH} DESTINATION ${SYCLCC_CONFIG_FILE_INSTALL_DIR})
 
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
-write_basic_package_version_file(
-  "${PROJECT_BINARY_DIR}/hipsycl-config-version.cmake"
-  VERSION ${hipSYCL_VERSION}
-  COMPATIBILITY SameMajorVersion
-)
+
+
+# Legacy module
+
+
+set(HIPSYCL_INSTALL_CMAKE_DIR
+  "lib/cmake/hipSYCL" CACHE PATH "Install path for legacy CMake config files")
 
 # Set relative paths for install root in the following variables so that
 # configure_package_config_file will generate paths relative whatever is
@@ -348,6 +424,15 @@ write_basic_package_version_file(
 set(HIPSYCL_INSTALL_COMPILER_DIR bin)
 set(HIPSYCL_INSTALL_LAUNCHER_DIR ${HIPSYCL_INSTALL_CMAKE_DIR})
 set(HIPSYCL_INSTALL_LAUNCHER_RULE_DIR ${HIPSYCL_INSTALL_CMAKE_DIR})
+
+install(PROGRAMS cmake/syclcc-launcher DESTINATION ${HIPSYCL_INSTALL_CMAKE_DIR})
+install(PROGRAMS cmake/syclcc-launch.rule.in DESTINATION ${HIPSYCL_INSTALL_CMAKE_DIR})
+
+write_basic_package_version_file(
+  "${PROJECT_BINARY_DIR}/hipsycl-config-version.cmake"
+  VERSION ${hipSYCL_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
 
 configure_package_config_file(
     ${PROJECT_SOURCE_DIR}/cmake/hipsycl-config.cmake.in
@@ -358,16 +443,67 @@ configure_package_config_file(
     HIPSYCL_INSTALL_LAUNCHER_DIR
     HIPSYCL_INSTALL_LAUNCHER_RULE_DIR
 )
+
 install(FILES
   ${PROJECT_BINARY_DIR}/hipsycl-config.cmake
   ${PROJECT_BINARY_DIR}/hipsycl-config-version.cmake
   DESTINATION ${HIPSYCL_INSTALL_CMAKE_DIR}
 )
+
 install(EXPORT install_exports
   FILE "hipsycl-targets.cmake"
   NAMESPACE hipSYCL::
   DESTINATION ${HIPSYCL_INSTALL_CMAKE_DIR}
 )
+
 mark_as_advanced(
   HIPSYCL_INSTALL_CMAKE_DIR
+)
+
+
+# New package
+
+set(OPENSYCL_INSTALL_CMAKE_DIR
+  "lib/cmake/OpenSYCL" CACHE PATH "Install path for CMake config files")
+
+# Set relative paths for install root in the following variables so that
+# configure_package_config_file will generate paths relative whatever is
+# the future install root
+set(OPENSYCL_INSTALL_COMPILER_DIR bin)
+set(OPENSYCL_INSTALL_LAUNCHER_DIR ${OPENSYCL_INSTALL_CMAKE_DIR})
+set(OPENSYCL_INSTALL_LAUNCHER_RULE_DIR ${OPENSYCL_INSTALL_CMAKE_DIR})
+
+install(PROGRAMS cmake/syclcc-launcher DESTINATION ${OPENSYCL_INSTALL_CMAKE_DIR})
+install(PROGRAMS cmake/syclcc-launch.rule.in DESTINATION ${OPENSYCL_INSTALL_CMAKE_DIR})
+
+write_basic_package_version_file(
+  "${PROJECT_BINARY_DIR}/opensycl-config-version.cmake"
+  VERSION ${hipSYCL_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    ${PROJECT_SOURCE_DIR}/cmake/opensycl-config.cmake.in
+    ${PROJECT_BINARY_DIR}/opensycl-config.cmake
+    INSTALL_DESTINATION ${OPENSYCL_INSTALL_CMAKE_DIR}
+    PATH_VARS
+    OPENSYCL_INSTALL_COMPILER_DIR
+    OPENSYCL_INSTALL_LAUNCHER_DIR
+    OPENSYCL_INSTALL_LAUNCHER_RULE_DIR
+)
+
+install(FILES
+  ${PROJECT_BINARY_DIR}/opensycl-config.cmake
+  ${PROJECT_BINARY_DIR}/opensycl-config-version.cmake
+  DESTINATION ${OPENSYCL_INSTALL_CMAKE_DIR}
+)
+
+install(EXPORT install_exports
+  FILE "opensycl-targets.cmake"
+  NAMESPACE OpenSYCL::
+  DESTINATION ${OPENSYCL_INSTALL_CMAKE_DIR}
+)
+
+mark_as_advanced(
+  OPENSYCL_INSTALL_CMAKE_DIR
 )

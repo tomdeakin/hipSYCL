@@ -81,8 +81,12 @@ BOOST_AUTO_TEST_CASE(allocation_functions) {
     verify_allocation_type(aligned_device_mem_ptr, sycl::usm::alloc::device);
     verify_allocation_type(host_ptr, sycl::usm::alloc::host);
     verify_allocation_type(aligned_host_ptr, sycl::usm::alloc::host);
-    verify_allocation_type(shared_ptr, sycl::usm::alloc::shared);
-    verify_allocation_type(aligned_shared_ptr, sycl::usm::alloc::shared);
+    // As of yet, ROCm does not have proper shared allocations
+    // and gives us device-accessible host memory instead.
+    if(q.get_device().get_backend() != sycl::backend::hip) {
+      verify_allocation_type(shared_ptr, sycl::usm::alloc::shared);
+      verify_allocation_type(aligned_shared_ptr, sycl::usm::alloc::shared);
+    }
     verify_allocation_type(unregistered_data.data(), sycl::usm::alloc::unknown);
   }
 
@@ -196,10 +200,23 @@ BOOST_AUTO_TEST_CASE(allocations_in_kernels) {
   });
 
   q.parallel_for<class usm_alloc_pf>(sycl::range<1>{test_size},
-                                     [=](sycl::id<1> idx) {
-                                       shared_allocation[idx.get(0)] += 1;
-                                       explicit_allocation[idx.get(0)] += 1;
-                                       mapped_host_allocation[idx.get(0)] += 1;
+                                     [=] (sycl::id<1> idx) {
+                                       // Use idx directly to also make sure
+                                       // that implicit conversion to size_t
+                                       // works
+                                       shared_allocation[idx] += 1;
+                                       explicit_allocation[idx] += 1;
+                                       mapped_host_allocation[idx] += 1;
+                                     });
+
+  q.parallel_for<class usm_alloc_pf2>(sycl::range<1>{test_size},
+                                     [=] (sycl::item<1> idx) {
+                                       // Use item directly to also make sure
+                                       // that implicit conversion to size_t
+                                       // works
+                                       shared_allocation[idx] += 1;
+                                       explicit_allocation[idx] += 1;
+                                       mapped_host_allocation[idx] += 1;
                                      });
 
   q.parallel_for<class usm_alloc_ndrange_pf>(
@@ -216,9 +233,9 @@ BOOST_AUTO_TEST_CASE(allocations_in_kernels) {
   q.wait();
 
   for (int i = 0; i < test_size; ++i){
-    BOOST_TEST(shared_allocation[i] == i + 2);
-    BOOST_TEST(host_explicit_allocation[i] == i + 2);
-    BOOST_TEST(mapped_host_allocation[i] == i + 2);
+    BOOST_TEST(shared_allocation[i] == i + 3);
+    BOOST_TEST(host_explicit_allocation[i] == i + 3);
+    BOOST_TEST(mapped_host_allocation[i] == i + 3);
   }
 
   sycl::free(shared_allocation, q);

@@ -30,6 +30,7 @@
 #include <string>
 #include <limits>
 
+#include "hipSYCL/common/debug.hpp"
 #include "hipSYCL/runtime/ze/ze_hardware_manager.hpp"
 #include "hipSYCL/runtime/device_id.hpp"
 #include "hipSYCL/runtime/error.hpp"
@@ -61,7 +62,7 @@ ze_context_manager::ze_context_manager(ze_driver_handle_t driver)
       HIPSYCL_DEBUG_INFO << "ze_context_manager: Destroying context..."
                          << std::endl;
       ze_result_t err = zeContextDestroy(*ptr);
-      assert(false);
+      
       if (err != ZE_RESULT_SUCCESS) {
         register_error(
             __hipsycl_here(),
@@ -262,8 +263,8 @@ bool ze_hardware_context::has(device_support_aspect aspect) const {
   case device_support_aspect::global_mem_cache_read_only:
     return false;
     break;
-  case device_support_aspect::global_mem_cache_write_only:
-    return false;
+  case device_support_aspect::global_mem_cache_read_write:
+    return true;
     break;
   case device_support_aspect::images:
     return false;
@@ -297,6 +298,13 @@ bool ze_hardware_context::has(device_support_aspect aspect) const {
   case device_support_aspect::execution_timestamps:
     return false;
     break;
+  case device_support_aspect::sscp_kernels:
+#ifdef HIPSYCL_WITH_SSCP_COMPILER
+    return true;
+#else
+    return false;
+#endif
+    break;
   }
   assert(false && "Unknown device aspect");
   std::terminate();
@@ -316,6 +324,15 @@ std::size_t ze_hardware_context::get_property(device_uint_property prop) const {
   case device_uint_property::max_global_size2:
     return _compute_props.maxGroupSizeZ * _compute_props.maxGroupCountZ;
     break;
+  case device_uint_property::max_group_size0:
+    return _compute_props.maxGroupSizeX;
+    break;
+  case device_uint_property::max_group_size1:
+    return _compute_props.maxGroupSizeY;
+    break;
+  case device_uint_property::max_group_size2:
+    return _compute_props.maxGroupSizeZ;
+    break;
   case device_uint_property::max_group_size:
     return _compute_props.maxTotalGroupSize;
     break;
@@ -328,6 +345,9 @@ std::size_t ze_hardware_context::get_property(device_uint_property prop) const {
       }
       return _compute_props.maxTotalGroupSize / min_subgroup_size;
     }
+    break;
+  case device_uint_property::needs_dimension_flip:
+    return true;
     break;
   case device_uint_property::preferred_vector_width_char:
     return 4;
@@ -497,32 +517,6 @@ uint32_t ze_hardware_context::get_ze_global_memory_ordinal() const {
   }
 
   return result;
-}
-
-result ze_hardware_context::obtain_module(module_id_t id,
-                                          const std::string &variant,
-                                          const std::string *module_image,
-                                          ze_module* &out) {
-  for(auto mod : _modules) {
-    if(mod->get_id() == id && mod->get_variant() == variant) {
-      out = mod.get();
-    }
-  }
-
-  _modules.emplace_back(
-      std::make_shared<ze_module>(_ctx, _device, id, variant, module_image));
-  if(!_modules.back()->get_build_status().is_success()){
-    _modules.pop_back();
-
-    return make_error(
-        __hipsycl_here(),
-        error_info{"ze_hardware_context: Module construction failed."});
-    
-  } else {
-    out = _modules.back().get();
-  }
-
-  return make_success();
 }
 
 ze_hardware_manager::ze_hardware_manager() {

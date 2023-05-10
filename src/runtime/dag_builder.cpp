@@ -31,6 +31,7 @@
 #include "hipSYCL/runtime/operations.hpp"
 #include "hipSYCL/runtime/dag_builder.hpp"
 #include "hipSYCL/runtime/serialization/serialization.hpp"
+#include "hipSYCL/sycl/access.hpp"
 
 #include <mutex>
 
@@ -44,6 +45,7 @@ namespace rt {
 
 namespace {
 
+
 // Add this node to the data users of the memory region of the specified
 // requirement
 void add_to_data_users(dag_node_ptr node, memory_requirement *mem_req) {
@@ -53,6 +55,40 @@ void add_to_data_users(dag_node_ptr node, memory_requirement *mem_req) {
     auto &data_users = cast<buffer_memory_requirement>(mem_req)
                            ->get_data_region()
                            ->get_users();
+    // This lambda is used to check whether an existing user
+    // should be overwritten by the new user. This is an important
+    // optimization: We KNOW that the new user is going to have
+    // dependencies on conflicting accesses, so we can just
+    // replace the tracking of those older accesses with the new one.
+    auto replaces_user = [&](const data_user& user) -> bool {
+      // Check if accessed range of new user is larger or equal.
+      // If its range does not encompass all the range of the existing
+      // user, we cannot remove the existing user.
+      for(int i = 0; i < 3; ++i) {
+        auto offset = mem_req->get_access_offset3d();
+        auto range = mem_req->get_access_range3d();
+
+        if (offset[i] > user.offset[i])
+          return false;
+        if (offset[i] + range[i] < user.offset[i] + user.range[i])
+          return false;
+      }
+
+      bool new_user_writes = mem_req->get_access_mode() != sycl::access_mode::read;
+      bool old_user_writes = user.mode != sycl::access_mode::read;
+
+      // Write accesses always create strong dependencies, so we can
+      // safely replace the old user in any case
+      if(new_user_writes)
+        return true;
+      // A read-only access is weaker than a write-access, so we can
+      // only replace if the other user is also a read-only access.
+      else if(!old_user_writes){
+        return true;
+      }
+
+      return false;
+    };
 
     // We need to add the user unconditionally, whether the user
     // is already registered or not. This is to cover the case
@@ -63,7 +99,8 @@ void add_to_data_users(dag_node_ptr node, memory_requirement *mem_req) {
     // that are not listed yet as requirement. 
     data_users.add_user(
         node, mem_req->get_access_mode(), mem_req->get_access_target(),
-        mem_req->get_access_offset3d(), mem_req->get_access_range3d());
+        mem_req->get_access_offset3d(), mem_req->get_access_range3d(),
+        replaces_user);
   
   } else
     assert(false && "dag: Image requirements are not yet implemented");
@@ -90,8 +127,7 @@ class kernel_operation;
 class memcpy_operation;
 class prefetch_operation;
 
-dag_builder::dag_builder(){}
-
+dag_builder::dag_builder(runtime *rt) : _rt{rt} {}
 
 dag_node_ptr dag_builder::build_node(std::unique_ptr<operation> op,
                                      const requirements_list& requirements,
@@ -124,7 +160,7 @@ dag_node_ptr dag_builder::build_node(std::unique_ptr<operation> op,
             if(user_ptr && is_conflicting_access(mem_req, user))
             {
               // No reason to take a dependency into account that is alreay completed
-              if(!user_ptr->is_complete())
+              if(!user_ptr->is_known_complete())
                 req_node->add_requirement(user_ptr);
             }
           });
@@ -134,7 +170,7 @@ dag_node_ptr dag_builder::build_node(std::unique_ptr<operation> op,
   };
 
   auto operation_node = std::make_shared<dag_node>(
-      hints, requirements.get(), std::move(op));
+      hints, requirements.get(), std::move(op), _rt);
   
   bool is_req = operation_node->get_operation()->is_requirement();
 
@@ -146,8 +182,10 @@ dag_node_ptr dag_builder::build_node(std::unique_ptr<operation> op,
     // with our requirements, but with the node itself
     add_conflicts_as_requirements(operation_node);
   
-  for (auto node : operation_node->get_requirements())
-    add_conflicts_as_requirements(node);
+  for (auto weak_node : operation_node->get_requirements()) {
+    if(auto node = weak_node.lock())
+      add_conflicts_as_requirements(node);
+  }
 
   // if this is an explicit requirement, we need to add *this*
   // operation to the users of the requirement it refers to.
@@ -232,14 +270,20 @@ dag dag_builder::finish_and_reset()
   dag final_dag = _current_dag;
   _current_dag = dag{};
 
-  final_dag.for_each_node([](dag_node_ptr node) {
-    HIPSYCL_DEBUG_INFO << "dag_builder: DAG contains operation: "
-                       << dump(node->get_operation()) << " @node " << node.get()
-                       << std::endl;
-    for (dag_node_ptr req : node->get_requirements()) {
-      HIPSYCL_DEBUG_INFO << "    --> requires: " << dump(req->get_operation())
-                         << " @node " << req.get() << std::endl;
+  HIPSYCL_DEBUG_INFO << "dag_builder: DAG contains operations: " << std::endl;
+  int operation_index = 0;
+  final_dag.for_each_node([&](dag_node_ptr node) {
+    HIPSYCL_DEBUG_INFO << operation_index << ". " << dump(node->get_operation())
+                       << " @node " << node.get() << std::endl;
+
+    for (auto weak_req : node->get_requirements()) {
+      if(auto req = weak_req.lock()) {
+        HIPSYCL_DEBUG_INFO << "    --> requires node @" << req.get()
+                          << " " << dump(req->get_operation()) << std::endl;
+      }
     }
+
+    ++operation_index;
   });
 
   return final_dag;

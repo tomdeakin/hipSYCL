@@ -33,6 +33,7 @@
 #include "hip_allocator.hpp"
 #include "hip_queue.hpp"
 #include "hip_hardware_manager.hpp"
+#include "hip_event_pool.hpp"
 
 #ifndef HIPSYCL_HIP_BACKEND_HPP
 #define HIPSYCL_HIP_BACKEND_HPP
@@ -57,10 +58,13 @@ public:
 
   virtual ~hip_backend(){}
 
+  virtual std::unique_ptr<backend_executor>
+  create_inorder_executor(device_id dev, int priority) override;
+
+  hip_event_pool* get_event_pool(device_id dev) const;
 private:
   mutable hip_hardware_manager _hw_manager;
   mutable multi_queue_executor _executor;
-  mutable std::vector<hip_allocator> _allocators;
 };
 
 }

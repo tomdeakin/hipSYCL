@@ -32,13 +32,13 @@
 
 #include "hipSYCL/sycl/libkernel/backend.hpp"
 #include "hipSYCL/sycl/libkernel/memory.hpp"
-#include "hipSYCL/sycl/detail/util.hpp"
+#include "hipSYCL/sycl/libkernel/bit_cast.hpp"
 
 #if HIPSYCL_LIBKERNEL_IS_DEVICE_PASS_HOST
 
 namespace hipsycl {
 namespace sycl {
-namespace detail {
+namespace detail::host_builtins {
 
 inline constexpr int builtin_memory_order(memory_order o) noexcept {
   switch(o){

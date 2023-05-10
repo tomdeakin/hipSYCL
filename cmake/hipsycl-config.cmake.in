@@ -1,5 +1,7 @@
 @PACKAGE_INIT@
 
+message(DEPRECATION "find_package(hipSYCL) is deprecated. Use find_package(OpenSYCL) instead. For this, you may have to set -DOpenSYCL_DIR=/install/prefix/lib/cmake/OpenSYCL. Additionally, replace -DHIPSYCL_* cmake arguments with -DOPENSYCL_*")
+
 set(HIPSYCL_SYCLCC "@PACKAGE_HIPSYCL_INSTALL_COMPILER_DIR@/syclcc-clang")
 set(HIPSYCL_SYCLCC_LAUNCHER "@PACKAGE_HIPSYCL_INSTALL_LAUNCHER_DIR@/syclcc-launcher")
 set(HIPSYCL_SYCLCC_LAUNCH_RULE_IN_FILE "@PACKAGE_HIPSYCL_INSTALL_LAUNCHER_RULE_DIR@/syclcc-launch.rule.in")
@@ -30,6 +32,7 @@ check_backend("hip")
 list(JOIN HIPSYCL_PLATFORM_OPTIONS " | " HIPSYCL_PLATFORMS_STRING)
 
 set(HIPSYCL_SYCLCC_EXTRA_ARGS "${HIPSYCL_SYCLCC_EXTRA_ARGS}" CACHE STRING "Arguments to pass through directly to syclcc.")
+set(HIPSYCL_SYCLCC_EXTRA_COMPILE_OPTIONS "${HIPSYCL_SYCLCC_EXTRA_COMPILE_OPTIONS}" CACHE STRING "Additional compile options for source files listed in add_sycl_to_target.")
 
 set(HIPSYCL_TARGETS_DESC "in the format HIPSYCL_TARGETS=<platform1>[:arch1[,arch2][..,archN]][;<platform2>[:arch1][...]][..;<platformN>] where platforms are one of ${HIPSYCL_PLATFORMS_STRING}")
 set(HIPSYCL_TARGETS "${HIPSYCL_TARGETS}" CACHE STRING "The platforms and architectures hipSYCL should target, ${HIPSYCL_TARGETS_DESC}.")
@@ -135,19 +138,33 @@ if(HIPSYCL_CPU_CXX)
   endif()
 endif()
 
+set(HIPSYCL_USE_ACCELERATED_CPU "${HIPSYCL_USE_ACCELERATED_CPU}" CACHE STRING "Enable compiler support for the nd_range parallel_for paradigm to accelerate it. Requires using clang as host compiler.")
+if(NOT HIPSYCL_USE_ACCELERATED_CPU)
+  set(HIPSYCL_USE_ACCELERATED_CPU_ENV $ENV{HIPSYCL_USE_ACCELERATED_CPU})
+  if(HIPSYCL_USE_ACCELERATED_CPU_ENV)
+    message("Found HIPSYCL_USE_ACCELERATED_CPU from environment: ${HIPSYCL_USE_ACCELERATED_CPU_ENV}")
+    set(HIPSYCL_USE_ACCELERATED_CPU "${HIPSYCL_USE_ACCELERATED_CPU_ENV}")
+  endif()
+endif()
+if(HIPSYCL_USE_ACCELERATED_CPU)
+  set(HIPSYCL_SYCLCC_EXTRA_ARGS "${HIPSYCL_SYCLCC_EXTRA_ARGS} --hipsycl-use-accelerated-cpu")
+elseif(NOT HIPSYCL_USE_ACCELERATED_CPU STREQUAL "")
+  set(HIPSYCL_SYCLCC_EXTRA_ARGS "${HIPSYCL_SYCLCC_EXTRA_ARGS} --hipsycl-use-accelerated-cpu=false")
+endif()
+
 # To invoke syclcc, the add_sycl_to_target function sets a compiler and linker launch rule on the target that will pass
 # the entire GCC or Clang command line to lib/cmake/hipSYCL/syclcc-launcher. The launcher will prepend syclcc-specific
 # arguments from HIPSYCL_SYCLCC_EXTRA_ARGS and replace GCC or Clang with syclcc in the command line.
 # This is done to keep COMPILE_FLAGS free from Clang-incompatible command line arguments, allowing it to be reused
 # by clang(d)-based tooling and IDEs.
 if(WIN32)
-  set(HIPSYCL_SYCLCC_LAUNCH_RULE "python ${HIPSYCL_SYCLCC_LAUNCHER} --launcher-cxx-compiler=${CMAKE_CXX_COMPILER} --launcher-syclcc=\"python*${HIPSYCL_SYCLCC}\" ${HIPSYCL_SYCLCC_EXTRA_ARGS}")
+  set(OPENSYCL_SYCLCC_LAUNCH_RULE "python ${HIPSYCL_SYCLCC_LAUNCHER} --launcher-cxx-compiler=${CMAKE_CXX_COMPILER} --launcher-syclcc=\"python*${HIPSYCL_SYCLCC}\" ${HIPSYCL_SYCLCC_EXTRA_ARGS}")
 else()
-  set(HIPSYCL_SYCLCC_LAUNCH_RULE "${HIPSYCL_SYCLCC_LAUNCHER} --launcher-cxx-compiler=${CMAKE_CXX_COMPILER} --launcher-syclcc=${HIPSYCL_SYCLCC} ${HIPSYCL_SYCLCC_EXTRA_ARGS}")
+  set(OPENSYCL_SYCLCC_LAUNCH_RULE "${HIPSYCL_SYCLCC_LAUNCHER} --launcher-cxx-compiler=${CMAKE_CXX_COMPILER} --launcher-syclcc=${HIPSYCL_SYCLCC} ${HIPSYCL_SYCLCC_EXTRA_ARGS}")
 endif()
 
 # All SYCL targets must be rebuilt when syclcc arguments change, e.g. by changing the target platform. Since the
-# contents of HIPSYCL_SYCLCC_LAUNCH_RULE are invisible to CMake's dependency tracking, we configure() a file with
+# contents of OPENSYCL_SYCLCC_LAUNCH_RULE are invisible to CMake's dependency tracking, we configure() a file with
 # the variables's content and have every object file within a SYCL target depend on it.
 set(HIPSYCL_SYCLCC_LAUNCH_RULE_FILE "${CMAKE_BINARY_DIR}/CMakeFiles/hipsycl-syclcc-launch.rule")
 configure_file("${HIPSYCL_SYCLCC_LAUNCH_RULE_IN_FILE}" "${HIPSYCL_SYCLCC_LAUNCH_RULE_FILE}" @ONLY)
@@ -165,23 +182,25 @@ function(add_sycl_to_target)
     ${ARGN}
   )
 
-  # The SOURCES argument to add_sycl_to_target is ignored and exists only for compatibility with ComputeCpp, since
-  # the compiler launcher can only be set with per-target granularity. Dependencies on the launcher args are therefore
-  # also set for all files in the list.
-  get_target_property(ADD_SYCL_SOURCES "${ADD_SYCL_TARGET}" SOURCES)
+  set_property(SOURCE ${ADD_SYCL_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
+      ${HIPSYCL_SYCLCC_EXTRA_COMPILE_OPTIONS})
 
-  foreach(ADD_SYCL_SOURCE_ITER IN LISTS ADD_SYCL_SOURCES)
-    get_source_file_property(ADD_SYCL_OBJECT_DEPENDS "${ADD_SYCL_SOURCE_ITER}" OBJECT_DEPENDS)
+  # The compiler launcher can only be set with per-target granularity. Dependencies on the launcher args are therefore
+  # also set for all files in the list.
+  get_target_property(ADD_SYCL_TARGET_ALL_SOURCES "${ADD_SYCL_TARGET}" SOURCES)
+
+  foreach(SOURCE_FILE_ITER IN LISTS ADD_SYCL_TARGET_ALL_SOURCES)
+    get_source_file_property(ADD_SYCL_OBJECT_DEPENDS "${SOURCE_FILE_ITER}" OBJECT_DEPENDS)
     if(ADD_SYCL_OBJECT_DEPENDS)
       set(ADD_SYCL_OBJECT_DEPENDS "${ADD_SYCL_OBJECT_DEPENDS};${HIPSYCL_SYCLCC_EXTRA_OBJECT_DEPENDS}")
     else()
       set(ADD_SYCL_OBJECT_DEPENDS "${HIPSYCL_SYCLCC_EXTRA_OBJECT_DEPENDS}")
     endif()
-    set_source_files_properties("${ADD_SYCL_SOURCE_ITER}" PROPERTIES OBJECT_DEPENDS "${ADD_SYCL_OBJECT_DEPENDS}")
+    set_source_files_properties("${SOURCE_FILE_ITER}" PROPERTIES OBJECT_DEPENDS "${ADD_SYCL_OBJECT_DEPENDS}")
   endforeach()
 
-  set_target_properties("${ADD_SYCL_TARGET}" PROPERTIES RULE_LAUNCH_COMPILE "${HIPSYCL_SYCLCC_LAUNCH_RULE}")
-  set_target_properties("${ADD_SYCL_TARGET}" PROPERTIES RULE_LAUNCH_LINK "${HIPSYCL_SYCLCC_LAUNCH_RULE}")
+  set_target_properties("${ADD_SYCL_TARGET}" PROPERTIES RULE_LAUNCH_COMPILE "${OPENSYCL_SYCLCC_LAUNCH_RULE}")
+  set_target_properties("${ADD_SYCL_TARGET}" PROPERTIES RULE_LAUNCH_LINK "${OPENSYCL_SYCLCC_LAUNCH_RULE}")
 
   target_link_libraries(${ADD_SYCL_TARGET} PUBLIC hipSYCL::hipSYCL-rt)
 endfunction()

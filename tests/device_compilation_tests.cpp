@@ -179,7 +179,7 @@ BOOST_AUTO_TEST_CASE(kernel_name_mangling) {
 
 template<class AccessorT>
 struct KernelFunctor {
-  
+
   KernelFunctor(AccessorT acc) : acc(acc) {};
 
   void operator() (cl::sycl::item<1> item) const {
@@ -296,7 +296,7 @@ BOOST_AUTO_TEST_CASE(forward_declared_function) {
   q.submit([&](cl::sycl::handler& cgh){
     cgh.single_task<forward_declared_test_kernel<int>>([=](){
       forward_declared1<int>();
-    });  
+    });
   });
 
   q.wait_and_throw();
@@ -339,7 +339,7 @@ BOOST_AUTO_TEST_CASE(optional_lambda_naming) {
         });
       };
   lambda();
-  
+
   q.wait_and_throw();
 }
 #endif
@@ -351,21 +351,37 @@ template <auto ...>
 struct VariadicKernelNTTP {};
 
 BOOST_AUTO_TEST_CASE(variadic_kernel_name) {
-    cl::sycl::queue queue;
-    cl::sycl::buffer<size_t, 1> buf(1);
-    {
-      queue.submit([&](cl::sycl::handler& cgh) {
-          auto acc = buf.get_access<cl::sycl::access::mode::discard_write>(cgh);
-          cgh.parallel_for<VariadicKernelTP<int, bool, char>>(cl::sycl::range<1>(1), [=](cl::sycl::item<1>) {});
-      });
-    }
-    {
-      queue.submit([&](cl::sycl::handler& cgh) {
-          auto acc = buf.get_access<cl::sycl::access::mode::discard_write>(cgh);
-          cgh.parallel_for<VariadicKernelNTTP<1, true, 'a'>>(cl::sycl::range<1>(1), [=](cl::sycl::item<1>) {});
-      });
-    }
+  cl::sycl::queue queue;
+  cl::sycl::buffer<size_t, 1> buf(1);
+  {
+    queue.submit([&](cl::sycl::handler& cgh) {
+        auto acc = buf.get_access<cl::sycl::access::mode::discard_write>(cgh);
+        cgh.parallel_for<VariadicKernelTP<int, bool, char>>(cl::sycl::range<1>(1), [=](cl::sycl::item<1>) {});
+    });
+  }
+  {
+    queue.submit([&](cl::sycl::handler& cgh) {
+        auto acc = buf.get_access<cl::sycl::access::mode::discard_write>(cgh);
+        cgh.parallel_for<VariadicKernelNTTP<1, true, 'a'>>(cl::sycl::range<1>(1), [=](cl::sycl::item<1>) {});
+    });
+  }
 }
 
+void h(){}
+void f(){ h(); }
+void g(){}
+
+BOOST_AUTO_TEST_CASE(generic_lambda_outlining) {
+  cl::sycl::queue q;
+  q.parallel_for(cl::sycl::range{1024}, [=](auto item){
+    f();
+
+    int x = 3;
+    auto invoke = [&](auto value){
+      g();
+    };
+    invoke(x);
+  });
+}
 BOOST_AUTO_TEST_SUITE_END() // NOTE: Make sure not to add anything below this line
 

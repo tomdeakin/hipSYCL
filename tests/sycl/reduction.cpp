@@ -35,6 +35,8 @@ using namespace cl;
 
 BOOST_FIXTURE_TEST_SUITE(reduction_tests, reset_device_fixture)
 
+#ifndef __HIPSYCL_ENABLE_LLVM_SSCP_TARGET__ // not yet supported for SSCP
+
 auto tolerance = boost::test_tools::tolerance(0.001f);
 
 template <class T, class Generator, class Handler, class BinaryOp>
@@ -151,9 +153,8 @@ void test_single_reduction(std::size_t input_size, std::size_t local_size,
         q.parallel<reduction_kernel<T,BinaryOp,__LINE__>>(
                       sycl::range{num_groups}, sycl::range{local_size}, 
                       sycl::reduction(output, identity, op), 
-                      [=](sycl::group<1> grp, sycl::physical_item<1> pidx, 
-                          auto& reducer){
-          grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx){
+                      [=](auto grp, auto& reducer){
+          sycl::distribute_items(grp, [&](sycl::s_item<1> idx){
             reducer.combine(input[idx.get_global_linear_id()]);
           });
         });
@@ -223,12 +224,15 @@ void test_two_reductions(std::size_t input_size, std::size_t local_size){
   if(input_size % local_size == 0) {
 
     q.parallel_for<reduction_kernel<T,class MultiOp,__LINE__>>(
-                sycl::nd_range(sycl::range{input_size}, 
-                               sycl::range{local_size}), 
+                sycl::nd_range(sycl::range{input_size},
+                               sycl::range{local_size}),
                 sycl::reduction(output0, T{0}, sycl::plus<T>{}),
-                sycl::reduction(output1, T{1}, sycl::multiplies<T>{}), 
+                sycl::reduction(output1, T{1}, sycl::multiplies<T>{}),
                 [=](sycl::nd_item<1> idx, auto& add_reducer, auto& mul_reducer){
       add_reducer += input0[idx.get_global_linear_id()];
+#ifdef __HIPSYCL_USE_ACCELERATED_CPU__
+      idx.barrier(); // workaround for omp simd failure as below.
+#endif
       mul_reducer *= input1[idx.get_global_linear_id()];
     });
 
@@ -258,21 +262,20 @@ void test_two_reductions(std::size_t input_size, std::size_t local_size){
 
     verify();
 
-    q.parallel<reduction_kernel<T,class MultiOp,__LINE__>>(
-                sycl::range{num_groups}, sycl::range{local_size},
-                sycl::reduction(output0, T{0}, sycl::plus<T>{}),
-                sycl::reduction(output1, T{1}, sycl::multiplies<T>{}), 
-                [=](sycl::group<1> grp, sycl::physical_item<1> pidx,
-                    auto& add_reducer, auto& mul_reducer){
-      
-      grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx){
-        mul_reducer *= input1[idx.get_global_linear_id()];
-      });
+    q.parallel<reduction_kernel<T, class MultiOp, __LINE__>>(
+        sycl::range{num_groups}, sycl::range{local_size},
+        sycl::reduction(output0, T{0}, sycl::plus<T>{}),
+        sycl::reduction(output1, T{1}, sycl::multiplies<T>{}),
+        [=](auto grp, auto &add_reducer, auto &mul_reducer) {
+          sycl::distribute_items(grp, [&](sycl::s_item<1> idx) {
+            mul_reducer *= input1[idx.get_global_linear_id()];
+          });
 
-      grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx){
-        add_reducer += input0[idx.get_global_linear_id()];
-      });
-    });
+          sycl::distribute_items(
+              grp, [&](sycl::s_item<1> idx) {
+                add_reducer += input0[idx.get_global_linear_id()];
+              });
+        });
 
     verify();
   }
@@ -358,5 +361,7 @@ BOOST_AUTO_TEST_CASE(accessor_reduction) {
   BOOST_CHECK(max_buff.get_host_access()[0] == 1023);
   BOOST_CHECK(sum_buff.get_host_access()[0] == 523776);
 }
+
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()
